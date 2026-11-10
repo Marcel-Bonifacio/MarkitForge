@@ -28,11 +28,25 @@ Other options: ``table_format`` ("markdown", "html" or "auto": HTML only
 for tables with merged cells) and ``pdf_inline_math`` (off by default:
 write inline formulas as ``$...$``).
 
+Images and scans (all off by default):
+- ``extract_images``: return every distinct embedded image as a PNG asset
+  (``page3_img1.png``) and link it where it sits in the reading order; the
+  alt text is the LLM caption when ``describe_images`` produced one.
+- ``ocr_scanned_pages``: recognise the text of pages without a usable text
+  layer (scans, garbled or near-empty layers over a page image) with
+  ``ocr_engine`` "llm" (``llm_client``/``llm_model``), "tesseract"
+  (pytesseract) or "auto" (the LLM when configured, else tesseract when
+  installed). OCR'd pages are listed in ``metadata["ocr_pages"]``.
+
+Progress (``progress``) is reported per page and per LLM call, and
+``cancel_event`` is checked before every page.
+
 ``pdf_reading_order="simple"`` with ``pdf_reflow=False`` gives the earlier
 line-by-line output; ``pdf_backend="pdfminer"`` skips layout analysis
 altogether.
 """
 
+import hashlib
 import io
 import logging
 import re
@@ -52,9 +66,11 @@ from .._base_converter import (
 from .._stream_info import StreamInfo
 from .._exceptions import (
     MISSING_DEPENDENCY_MESSAGE,
+    ConversionCancelled,
     MissingDependencyException,
     ResourceLimitException,
 )
+from .._progress import check_cancelled, report_progress
 from ..converter_utils._text_safety import neutralize_page_markers
 from ..converter_utils.pdf._docling import convert_with_docling
 from ..converter_utils.pdf import _tables as _pdf_tables
@@ -77,6 +93,16 @@ from ..converter_utils.pdf._layout import (
     is_math_font,
     simple_flow,
 )
+from ..converter_utils.pdf._ocr import (
+    LLM_OCR_RESOLUTION,
+    OCR_ENGINES,
+    OCR_PROMPT,
+    TESSERACT_RESOLUTION,
+    clean_ocr_text,
+    ocr_warning,
+    resolve_engine,
+    tesseract_text,
+)
 from ..converter_utils.pdf._metadata import (
     build_metadata,
     read_metadata,
@@ -93,11 +119,13 @@ from ..converter_utils.pdf._tables import (
 from ..converter_utils.pdf._visual import (
     DEFAULT_MAX_LLM_CALLS,
     DEFAULT_MAX_RENDER_PIXELS,
+    RegionTooLarge,
     VisualBudget,
-    describe_page_images,
     apply_inline_math,
     find_math_regions,
+    page_image_blocks,
     page_images,
+    render_region_png,
     transcribe_math_regions,
 )
 from ._llm_caption import llm_caption
@@ -641,6 +669,12 @@ class _Options:
     merge_tables: bool = True
     table_format: str = "markdown"
     inline_math: bool = False
+    extract_images: bool = False
+    ocr_scanned_pages: bool = False
+    ocr_engine: str = "auto"
+    ocr_lang: Optional[str] = None
+    # Only "progress" and "cancel_event", for report_progress/check_cancelled.
+    hooks: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_kwargs(cls, kwargs: Dict[str, Any]) -> "_Options":
@@ -650,6 +684,14 @@ class _Options:
                 f"Unknown pdf_reading_order {order!r}; use one of: "
                 + ", ".join(PDF_READING_ORDERS)
             )
+        engine = str(kwargs.get("ocr_engine") or "auto").strip().lower()
+        if engine not in OCR_ENGINES:
+            raise ValueError(
+                f"Unknown ocr_engine {engine!r}; use one of: " + ", ".join(OCR_ENGINES)
+            )
+        lang = kwargs.get("ocr_lang")
+        if lang is not None and not re.fullmatch(r"[A-Za-z0-9_+]{1,64}", str(lang)):
+            raise ValueError(f"Bad ocr_lang {lang!r}; use e.g. 'eng' or 'eng+deu'")
         return cls(
             page_markers=bool(kwargs.get("page_markers", False)),
             describe_images=bool(kwargs.get("describe_images", False)),
@@ -669,6 +711,11 @@ class _Options:
             merge_tables=_flag(kwargs, "pdf_merge_tables", True),
             table_format=str(kwargs.get("table_format") or "markdown"),
             inline_math=_flag(kwargs, "pdf_inline_math", False),
+            extract_images=_flag(kwargs, "extract_images", False),
+            ocr_scanned_pages=_flag(kwargs, "ocr_scanned_pages", False),
+            ocr_engine=engine,
+            ocr_lang=str(lang) if lang is not None else None,
+            hooks={k: kwargs.get(k) for k in ("progress", "cancel_event")},
         )
 
     @property
@@ -684,6 +731,11 @@ class _Options:
         return self.transcribe_formulas and self.has_llm
 
     @property
+    def wants_images(self) -> bool:
+        """Whether image links are placed in the output at all."""
+        return self.can_describe or self.extract_images
+
+    @property
     def legacy_text(self) -> bool:
         """Line-by-line output as before reading order and reflow existed:
         plain pages take their text from pdfminer."""
@@ -694,9 +746,11 @@ class _Options:
 class _PageRecord:
     """What one page produced; pages are closed before Markdown is assembled.
 
-    kind is "form" (legacy form heuristics), "structured" (tables, images or
-    formulas placed among text lines) or "plain" (text only). ``flow`` holds
-    the lines and blocks of a non-form page in reading order.
+    kind is "form" (legacy form heuristics), "ocr" (text recognised from the
+    rendered page), "structured" (tables, images or formulas placed among
+    text lines) or "plain" (text only). ``flow`` holds the lines and blocks
+    of a form-less, OCR-less page in reading order; "form" and "ocr" pages
+    keep their final Markdown in ``text``.
     """
 
     index: int
@@ -718,6 +772,11 @@ class _State:
     assets: List[DocumentAsset] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     visual: VisualBudget = field(default_factory=VisualBudget)
+    # OCR: the engine in use (None = no OCR), pages done, answers by digest.
+    ocr_engine: Optional[str] = None
+    ocr_pages: List[int] = field(default_factory=list)
+    ocr_cache: Dict[str, str] = field(default_factory=dict)
+    ocr_skipped: List[int] = field(default_factory=list)
 
 
 def _page_list(pages: List[int]) -> str:
@@ -734,7 +793,7 @@ def _page_list(pages: List[int]) -> str:
     return ", ".join(spans)
 
 
-_OCR_HINT = "Try the markitforge-ocr plugin."
+_OCR_HINT = "Use ocr_scanned_pages=True (CLI --ocr) or the markitforge-ocr plugin."
 
 
 def _layer_warnings(pages: List[int], one: str, many: str) -> List[str]:
@@ -1022,6 +1081,7 @@ class PdfConverter(DocumentConverter):
         pdf_bytes = io.BytesIO(file_stream.read())
         opts = _Options.from_kwargs(kwargs)
         _check_page_count(pdf_bytes, opts.max_pdf_pages)
+        check_cancelled(opts.hooks)
 
         if backend == "docling":
             return self._convert_docling(pdf_bytes, opts)
@@ -1030,7 +1090,11 @@ class PdfConverter(DocumentConverter):
 
         try:
             return self._convert_pdfplumber(pdf_bytes, opts)
-        except (MissingDependencyException, ResourceLimitException):
+        except (
+            MissingDependencyException,
+            ResourceLimitException,
+            ConversionCancelled,
+        ):
             raise
         except Exception as exc:
             if backend == "pdfplumber":
@@ -1071,6 +1135,8 @@ class PdfConverter(DocumentConverter):
             markdown = join_sections(sections, markers=True)
         else:
             markdown = _merge_partial_numbering_lines(raw)
+        self._report_all_pages(opts, len(sections))
+        warnings = warnings + self._backend_option_warnings(opts, "pdfminer")
         return DocumentConverterResult(
             markdown=markdown,
             title=metadata.get("title"),
@@ -1089,12 +1155,35 @@ class PdfConverter(DocumentConverter):
         metadata = self._read_metadata(pdf_bytes)
         if opts.page_markers:
             markdown = join_sections(sections, markers=True)
+        self._report_all_pages(opts, len(sections))
         return DocumentConverterResult(
             markdown=markdown,
             title=metadata.get("title"),
             metadata=metadata,
             pages=sections,
+            warnings=self._backend_option_warnings(opts, "docling"),
         )
+
+    @staticmethod
+    def _report_all_pages(opts: _Options, total: int) -> None:
+        """Page events for backends that convert the document in one go."""
+        for done in range(1, total + 1):
+            report_progress(opts.hooks, "page", done, total)
+
+    @staticmethod
+    def _backend_option_warnings(opts: _Options, backend: str) -> List[str]:
+        out: List[str] = []
+        if opts.extract_images:
+            out.append(
+                f"extract_images is not supported by the {backend} backend; "
+                "no images were exported."
+            )
+        if opts.ocr_scanned_pages:
+            out.append(
+                f"ocr_scanned_pages is not supported by the {backend} backend; "
+                "scanned pages were not recognised."
+            )
+        return out
 
     def _read_metadata(self, pdf_bytes: io.BytesIO) -> Dict[str, Any]:
         try:
@@ -1108,12 +1197,20 @@ class PdfConverter(DocumentConverter):
         self, pdf_bytes: io.BytesIO, opts: _Options
     ) -> DocumentConverterResult:
         """Layout-aware conversion in one pass over the pages."""
+        hooks = opts.hooks
+
+        def on_llm_call(count: int) -> None:
+            report_progress(hooks, "llm", count, None, f"LLM call {count}")
+
         state = _State(
             visual=VisualBudget(
                 max_llm_calls=opts.max_llm_calls,
                 max_render_pixels=opts.max_render_pixels,
+                on_llm_call=on_llm_call,
             )
         )
+        if opts.ocr_scanned_pages:
+            state.ocr_engine = resolve_engine(opts.ocr_engine, opts.has_llm)
         records: List[_PageRecord] = []
         outline: List[OutlineEntry] = []
         # page.close() after each page frees pdfplumber's cached objects and
@@ -1121,7 +1218,9 @@ class PdfConverter(DocumentConverter):
         with pdfplumber.open(pdf_bytes) as pdf:
             info = dict(pdf.metadata or {})
             page_ids: Dict[int, int] = {}
+            total = len(pdf.pages)
             for page_idx, page in enumerate(pdf.pages):
+                check_cancelled(hooks)
                 try:
                     page_id = getattr(getattr(page, "page_obj", None), "pageid", None)
                     if page_id is not None:
@@ -1129,13 +1228,14 @@ class PdfConverter(DocumentConverter):
                     records.append(self._process_page(page, page_idx + 1, opts, state))
                 finally:
                     page.close()  # Free cached page data immediately
+                report_progress(hooks, "page", page_idx + 1, total)
             if opts.outline_headings:
                 outline = [
                     OutlineEntry(level, title, page_no)
                     for level, title, page_no in read_outline(pdf.doc, page_ids)
                 ]
 
-        text_records = [r for r in records if r.kind != "form"]
+        text_records = [r for r in records if r.kind not in ("form", "ocr")]
         flows: Dict[int, Flow] = {r.index: r.flow for r in text_records}
 
         # Running headers and footers, judged over the whole document.
@@ -1168,7 +1268,7 @@ class PdfConverter(DocumentConverter):
         sections: List[DocumentSection] = []
         chunks: List[str] = []
         for rec in records:
-            if rec.kind == "form":
+            if rec.kind in ("form", "ocr"):
                 md = rec.text
             elif rec.index in texts:
                 md = texts[rec.index]
@@ -1216,12 +1316,20 @@ class PdfConverter(DocumentConverter):
         metadata = build_metadata(info, len(records))
         if removed:
             metadata["removed_headers_footers"] = removed
+        done = set(state.ocr_pages)
         warnings = (
-            _scan_warnings(state.scan_pages)
-            + _garbled_warnings(state.garbled_pages)
-            + _sparse_warnings(state.sparse_pages)
-            + state.warnings
+            _scan_warnings([p for p in state.scan_pages if p not in done])
+            + _garbled_warnings([p for p in state.garbled_pages if p not in done])
+            + _sparse_warnings([p for p in state.sparse_pages if p not in done])
         )
+        if opts.ocr_scanned_pages:
+            metadata["ocr_pages"] = list(state.ocr_pages)
+            if state.ocr_pages:
+                metadata["ocr_engine"] = state.ocr_engine
+                warnings.append(
+                    ocr_warning(state.ocr_pages, str(state.ocr_engine), _page_list)
+                )
+        warnings.extend(state.warnings)
         warnings.extend(self._option_warnings(opts, state))
         return DocumentConverterResult(
             markdown=markdown,
@@ -1302,21 +1410,40 @@ class PdfConverter(DocumentConverter):
         chars = page.chars
         visible = [c for c in chars if str(c.get("text", "")).strip()]
         state.sizes.update(round(float(c.get("size", 0.0)), 1) for c in visible)
+        no_text_layer = True
         if not visible:
             if page.images:
                 state.scan_pages.append(page_no)
+            else:
+                no_text_layer = False
         elif _is_garbled([str(c.get("text", "")) for c in visible]):
             state.garbled_pages.append(page_no)
         elif page.images and _is_sparse_over_image(page, visible):
             state.sparse_pages.append(page_no)
+        else:
+            no_text_layer = False
         math_chars = sum(1 for c in visible if is_math_font(c.get("fontname", "")))
         if math_chars >= _MATH_WARNING_MIN_CHARS:
             state.math_pages.append(page_no)
 
+        if no_text_layer and state.ocr_engine is not None:
+            ocr_text = self._ocr_page(page, page_no, opts, state)
+            if ocr_text is not None:
+                if opts.extract_images:
+                    # The scan image is the page just read: export it, but
+                    # do not spend another LLM call captioning it.
+                    images = self._describe_images(
+                        page, page_no, opts, state, describe=False
+                    )
+                    ocr_text = "\n\n".join(
+                        [ocr_text] + [b.markdown for b in images]
+                    ).strip()
+                return _PageRecord(page_no, "ocr", text=ocr_text)
+
         form_content = _extract_form_content_from_words(page)
         tables = find_page_tables(page)
         if form_content is not None and not _tables_cover_form(form_content, tables):
-            if opts.can_describe:
+            if opts.wants_images:
                 images = self._describe_images(page, page_no, opts, state)
                 if images:
                     form_content = "\n\n".join(
@@ -1335,7 +1462,7 @@ class PdfConverter(DocumentConverter):
             )
             for t in tables
         ]
-        if opts.can_describe:
+        if opts.wants_images:
             blocks.extend(self._describe_images(page, page_no, opts, state))
 
         text_chars = (
@@ -1413,11 +1540,19 @@ class PdfConverter(DocumentConverter):
         return out
 
     def _describe_images(
-        self, page: Any, page_no: int, opts: _Options, state: _State
+        self,
+        page: Any,
+        page_no: int,
+        opts: _Options,
+        state: _State,
+        describe: bool = True,
     ) -> List[Block]:
-        return describe_page_images(
+        """Image links (captioned and/or exported) for a page."""
+        return page_image_blocks(
             page,
             page_no,
+            describe=describe and opts.can_describe,
+            export=opts.extract_images,
             client=opts.llm_client,
             model=str(opts.llm_model),
             prompt=opts.llm_prompt,
@@ -1427,9 +1562,95 @@ class PdfConverter(DocumentConverter):
             budget=state.visual,
         )
 
+    def _ocr_page(
+        self, page: Any, page_no: int, opts: _Options, state: _State
+    ) -> Optional[str]:
+        """Recognised Markdown for a page without a usable text layer, or
+        None when OCR failed or is over budget (the page keeps its scan
+        warning)."""
+        engine = state.ocr_engine
+        budget = state.visual
+        if engine == "llm" and budget.exhausted:
+            state.ocr_skipped.append(page_no)
+            return None
+        check_cancelled(opts.hooks)
+        resolution = LLM_OCR_RESOLUTION if engine == "llm" else TESSERACT_RESOLUTION
+        try:
+            bbox = tuple(float(v) for v in page.bbox)
+            png = render_region_png(
+                page,
+                bbox,  # type: ignore[arg-type]
+                resolution=resolution,
+                max_pixels=opts.max_render_pixels,
+            )
+        except RegionTooLarge as exc:
+            state.warnings.append(
+                f"Could not OCR page {page_no}: it is too large to render "
+                f"({exc}; see max_render_pixels)."
+            )
+            return None
+        except Exception as exc:
+            logger.warning("Could not render page %s: %s", page_no, exc, exc_info=True)
+            state.warnings.append(f"Could not OCR page {page_no}: {exc}")
+            return None
+        if not png:
+            return None
+        key = f"{engine}:{hashlib.sha256(png).hexdigest()}"
+        answer = state.ocr_cache.get(key)
+        if answer is None:
+            if engine == "llm" and not budget.can_call_llm(state.warnings):
+                state.ocr_skipped.append(page_no)
+                return None
+            try:
+                if engine == "llm":
+                    raw = llm_caption(
+                        io.BytesIO(png),
+                        StreamInfo(mimetype="image/png", extension=".png"),
+                        client=opts.llm_client,
+                        model=str(opts.llm_model),
+                        prompt=OCR_PROMPT,
+                    )
+                else:
+                    raw = tesseract_text(png, opts.ocr_lang)
+            except ConversionCancelled:
+                raise
+            except Exception as exc:
+                logger.warning("OCR failed on page %s: %s", page_no, exc, exc_info=True)
+                state.warnings.append(f"Could not OCR page {page_no}: {exc}")
+                return None
+            answer, truncated = clean_ocr_text(raw if isinstance(raw, str) else "")
+            if truncated:
+                state.warnings.append(
+                    f"The OCR text of page {page_no} was cut to {len(answer)} "
+                    "characters."
+                )
+            state.ocr_cache[key] = answer
+        if not answer:
+            return None
+        state.ocr_pages.append(page_no)
+        return answer
+
     @staticmethod
     def _option_warnings(opts: _Options, state: _State) -> List[str]:
         warnings: List[str] = []
+        needs_ocr = state.scan_pages or state.garbled_pages or state.sparse_pages
+        if opts.ocr_scanned_pages and needs_ocr and state.ocr_engine is None:
+            if opts.ocr_engine == "llm":
+                warnings.append(
+                    "ocr_engine='llm' needs llm_client and llm_model; "
+                    "scanned pages were not recognised."
+                )
+            else:
+                warnings.append(
+                    "ocr_scanned_pages found no OCR engine (pass llm_client and "
+                    "llm_model, or install pytesseract and tesseract); scanned "
+                    "pages were not recognised."
+                )
+        if state.ocr_skipped:
+            warnings.append(
+                f"Page(s) {_page_list(state.ocr_skipped)} were not OCR'd: the "
+                f"LLM call budget (max_llm_calls={opts.max_llm_calls}) was spent."
+            )
         if opts.describe_images and not opts.has_llm:
             warnings.append(
                 "describe_images needs llm_client and llm_model; "
