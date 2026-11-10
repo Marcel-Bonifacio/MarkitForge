@@ -514,8 +514,53 @@ def _count_tables(md: str) -> int:
 # ------------------------------------------------------------------- runner --
 
 
+def load_corpus(directory: Path) -> List[Case]:
+    """Real-world cases: every ``name.ext`` with a ``name.truth.json`` beside it.
+
+    truth.json keys (all optional): words, headings, cells, order, absent,
+    single_line, table_count, options. Keep the documents themselves out of
+    git unless their license allows redistribution.
+    """
+    cases: List[Case] = []
+    for truth in sorted(directory.glob("*.truth.json")):
+        stem = truth.name[: -len(".truth.json")]
+        docs = [
+            p
+            for p in directory.glob(stem + ".*")
+            if p != truth and not p.name.endswith(".json")
+        ]
+        if not docs:
+            print(f"  {truth.name}: no document next to it, skipped", file=sys.stderr)
+            continue
+        data = json.loads(truth.read_text(encoding="utf-8"))
+        allowed = {
+            "words",
+            "headings",
+            "cells",
+            "order",
+            "absent",
+            "single_line",
+            "table_count",
+            "options",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            print(f"  {truth.name}: ignoring {sorted(unknown)}", file=sys.stderr)
+        doc = docs[0]
+        cases.append(
+            Case(
+                name=stem,
+                build=lambda _d, doc=doc: doc,
+                **{k: v for k, v in data.items() if k in allowed},
+            )
+        )
+    return cases
+
+
 def run(
-    configs: Dict[str, Dict], engine: str = "markitforge"
+    configs: Dict[str, Dict],
+    engine: str = "markitforge",
+    cases: Optional[List[Case]] = None,
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     if engine == "markitdown":  # upstream, for before/after comparisons
         from markitdown import MarkItDown as Engine
@@ -526,7 +571,7 @@ def run(
     results: Dict[str, Dict[str, Dict[str, float]]] = {}
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        for case in CASES:
+        for case in cases if cases is not None else CASES:
             path = case.build(d)
             for cfg_name, opts in configs.items():
                 if cfg_name != "default" and not path.suffix == ".pdf":
@@ -571,12 +616,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         default="markitforge",
         help="markitdown = score upstream MarkItDown (if installed) for comparison",
     )
+    ap.add_argument(
+        "--corpus",
+        type=Path,
+        help="Score real documents in DIR (each with NAME.truth.json) instead of "
+        "the built-in cases; --check/--update-baseline then use DIR/baseline.json.",
+    )
     args = ap.parse_args(argv)
+
+    global BASELINE
+    cases = None
+    if args.corpus:
+        cases = load_corpus(args.corpus)
+        if not cases:
+            print(f"No *.truth.json cases in {args.corpus}", file=sys.stderr)
+            return 1
+        BASELINE = args.corpus / "baseline.json"
 
     configs = {"default": {}}
     if args.engine == "markitforge":
         configs["pdfminer"] = {"pdf_backend": "pdfminer"}
-    results = run(configs, args.engine)
+    results = run(configs, args.engine, cases)
 
     if args.json:
         print(json.dumps(results, indent=2))

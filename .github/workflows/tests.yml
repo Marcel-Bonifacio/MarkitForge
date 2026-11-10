@@ -1,5 +1,9 @@
 name: tests
-on: [pull_request]
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 
@@ -139,6 +143,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -146,8 +152,42 @@ jobs:
       - name: Install packages
         run: pip install "./packages/markitforge[all]" reportlab python-docx openpyxl
 
+      - name: Upstream sync script tests
+        run: pip install pytest && python -m pytest -q scripts/test_sync_upstream.py
+
       - name: Formats doc is up to date
         run: python scripts/gen_formats_doc.py --check
 
       - name: Quality benchmark (fails on regression)
         run: python benchmarks/run_benchmark.py --check
+
+      - name: Real-document corpus (fails on regression)
+        run: python benchmarks/run_benchmark.py --corpus benchmarks/corpus --check
+
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: pip install "./packages/markitforge[all]" mypy
+      - name: mypy
+        run: mypy --ignore-missing-imports packages/markitforge/src/markitforge
+
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install packages
+        run: pip install "./packages/markitforge[all]" pytest pytest-cov pytest-timeout openai pyyaml reportlab python-docx
+      - name: Tests with coverage
+        working-directory: packages/markitforge
+        run: |
+          pytest -q --timeout 300 --cov=markitforge --cov-report=term --cov-report=markdown-append:$GITHUB_STEP_SUMMARY --cov-fail-under=85
