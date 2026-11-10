@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build the MarkitForge desktop app (packaging/markitforge_gui.spec):
+#  * macOS (Apple Silicon): MarkitForge-<version>-macos-arm64.dmg (ad hoc signed)
+#  * Windows (x64): MarkitForge-<version>-windows-x64.zip (MarkitForge.exe folder)
+# Each build is smoke-tested (the app is started and converts test files).
+# On a version tag the files are attached to the GitHub Release for that tag
+# (a draft release is created if none exists yet). See packaging/README.md.
+name: release-apps
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-apps-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: "1"
+  PIP_CONSTRAINT: ${{ github.workspace }}/.github/constraints.txt
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install packages and build tools
+        run: |
+          python -m pip install "./packages/markitforge[all]" ./packages/markitforge-gui \
+            -r packaging/requirements-build.txt
+
+      # build_macos.sh runs packaging/collect_licenses.py before PyInstaller.
+      - name: Build MarkitForge.app and .dmg
+        env:
+          PYTHON: python
+        run: bash packaging/build_macos.sh "$RUNNER_TEMP/mf"
+
+      - name: Smoke test
+        run: python packaging/smoke_test.py "$RUNNER_TEMP/mf/dist/MarkitForge.app/Contents/MacOS/MarkitForge"
+
+      - name: Collect artifact
+        run: |
+          mkdir -p out
+          mv "$RUNNER_TEMP"/mf/MarkitForge-*.dmg out/
+          test -f "$RUNNER_TEMP/mf/dist/MarkitForge.app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
+          (cd out && shasum -a 256 *.dmg > SHA256SUMS-macos.txt)
+          ls -la out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-macos
+          path: out/
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install packages and build tools
+        run: |
+          python -m pip install "./packages/markitforge[all]" ./packages/markitforge-gui `
+            -r packaging/requirements-build.txt
+
+      - name: Collect third-party licenses
+        run: python packaging/collect_licenses.py --out "$env:RUNNER_TEMP/mf/THIRD_PARTY_LICENSES.txt"
+
+      - name: Build MarkitForge.exe
+        run: |
+          python packaging/make_icons.py --out "$env:RUNNER_TEMP/mf/work/icons"
+          $env:MARKITFORGE_ICON_DIR = "$env:RUNNER_TEMP/mf/work/icons"
+          $env:MARKITFORGE_LICENSES_FILE = "$env:RUNNER_TEMP/mf/THIRD_PARTY_LICENSES.txt"
+          python -m PyInstaller --noconfirm --clean `
+            --distpath "$env:RUNNER_TEMP/mf/dist" --workpath "$env:RUNNER_TEMP/mf/work" `
+            packaging/markitforge_gui.spec
+
+      - name: Smoke test
+        run: python packaging/smoke_test.py "$env:RUNNER_TEMP/mf/dist/MarkitForge/MarkitForge.exe"
+
+      - name: Collect artifact
+        run: |
+          $version = python -c "import runpy; print(runpy.run_path('packages/markitforge-gui/src/markitforge_gui/__about__.py')['__version__'])"
+          if (-not (Test-Path "$env:RUNNER_TEMP/mf/dist/MarkitForge/THIRD_PARTY_LICENSES.txt")) { throw "THIRD_PARTY_LICENSES.txt missing" }
+          New-Item -ItemType Directory -Force out | Out-Null
+          $zip = "out/MarkitForge-$version-windows-x64.zip"
+          Compress-Archive -Path "$env:RUNNER_TEMP/mf/dist/MarkitForge" -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          "$hash  $(Split-Path $zip -Leaf)" | Out-File -Encoding ascii out/SHA256SUMS-windows.txt
+          Get-ChildItem out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-windows
+          path: out/
+          if-no-files-found: error
+
+  release:
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release / upload its files
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: app-*
+          path: out/
+          merge-multiple: true
+
+      - name: Attach to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la out
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --generate-notes --title "$TAG"
+          fi
+          gh release upload "$TAG" out/* --clobber

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build tools for the desktop app, on top of the local packages:
+#   pip install "./packages/markitforge[all]" ./packages/markitforge-gui -r packaging/requirements-build.txt
+# Pinned so a release build does not silently pick up a new bundler.
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.10
+# Native window (markitforge-gui[window]); without it the app opens the browser.
+pywebview==6.2.1
+# AI features (image descriptions, formulas, LLM OCR) need an OpenAI-compatible
+# client; pytesseract lets the app use a separately installed tesseract.
+openai==3.49.0
+pytesseract==0.3.13
