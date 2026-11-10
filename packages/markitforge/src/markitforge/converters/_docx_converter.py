@@ -19,6 +19,8 @@ from ._llm_caption import llm_caption
 from ..converter_utils.docx.core_properties import read_core_properties
 from ..converter_utils.docx.headers_footers import read_headers_footers
 from ..converter_utils.docx.page_breaks import (
+    PAGE_COUNT_MODES,
+    libreoffice_page_count,
     new_sentinel,
     remove_sentinels,
     split_pages,
@@ -127,7 +129,10 @@ class _DocxImageHandler:
         self._prompt = options.get("llm_prompt")
         self._images: Dict[str, _Image] = {}
         self._inline = InlineBudget(limits.max_inline_bytes)
-        self._captions = CaptionCache(limits.max_llm_calls)
+        self._captions = CaptionCache(
+            limits.max_llm_calls,
+            similar=bool(options.get("dedupe_similar_images", True)),
+        )
         self.assets: List[DocumentAsset] = []
         self._warnings: List[str] = []
         if describe and (self._client is None or self._model is None):
@@ -300,9 +305,25 @@ class DocxConverter(HtmlConverter):
                 _dependency_exc_info[2]
             )
 
+        page_count_mode = kwargs.get("docx_page_count") or None
+        if page_count_mode is not None and page_count_mode not in PAGE_COUNT_MODES:
+            raise ValueError(
+                "docx_page_count must be one of "
+                f"{', '.join(PAGE_COUNT_MODES)} (or None); got {page_count_mode!r}"
+            )
+
         # Reject archive bombs before anything reads a member.
         budget = get_budget(kwargs)
         check_archive_stream(file_stream, budget)
+
+        rendered_pages: Optional[int] = None
+        page_count_problem = ""
+        if page_count_mode == "libreoffice":
+            start = file_stream.tell()
+            rendered_pages, page_count_problem = libreoffice_page_count(
+                file_stream.read(), kwargs
+            )
+            file_stream.seek(start)
 
         markers = bool(kwargs.get("page_markers", False))
         sentinel = new_sentinel()
@@ -372,6 +393,28 @@ class DocxConverter(HtmlConverter):
                 metadata["headers"] = headers
             if footers:
                 metadata["footers"] = footers
+
+        if page_count_mode is not None:
+            # "pages" stays as split at the breaks stored in the file; the
+            # metadata says how many pages the document really has.
+            if rendered_pages is None:
+                metadata["page_count"] = len(sections)
+                metadata["page_count_source"] = "stored_breaks"
+                warnings.append(
+                    f"docx_page_count={page_count_mode!r}: {page_count_problem}; "
+                    "page_count is the number of sections found from the page "
+                    "breaks stored in the file."
+                )
+            else:
+                metadata["page_count"] = rendered_pages
+                metadata["page_count_source"] = page_count_mode
+                if rendered_pages != len(sections):
+                    warnings.append(
+                        f"LibreOffice lays this document out on {rendered_pages} "
+                        f"page(s), but the page breaks stored in the file give "
+                        f"{len(sections)} section(s); 'pages' follows the stored "
+                        "breaks and may not match the real pages."
+                    )
 
         assets: List[DocumentAsset] = images.assets
         warnings.extend(images.warnings)

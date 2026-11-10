@@ -1250,7 +1250,13 @@ def pdf_activity(monkeypatch):
 def _convert_cleanup_fixture(kind):
     return (
         MarkitForge()
-        .convert(os.path.join(TEST_FILES_DIR, f"pdf_cleanup_{kind}.pdf"))
+        .convert(
+            os.path.join(TEST_FILES_DIR, f"pdf_cleanup_{kind}.pdf"),
+            # These tests cover the legacy two-pass path (pdfplumber, then
+            # pdfminer for plain pages), which is still available on request.
+            pdf_reading_order="simple",
+            pdf_reflow=False,
+        )
         .markdown
     )
 

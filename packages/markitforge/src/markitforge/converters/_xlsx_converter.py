@@ -4,13 +4,15 @@
 # SPDX-License-Identifier: MIT AND Apache-2.0
 # Derived from MarkItDown (MIT). MarkitForge changes are Apache-2.0; see NOTICE.
 
+import datetime
+import html
 import io
 import posixpath
 import re
 import sys
 import zipfile
 from contextlib import contextmanager
-from typing import BinaryIO, Any, Dict, Iterator, List, Optional, Tuple
+from typing import BinaryIO, Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from defusedxml import ElementTree as ET
 
@@ -22,7 +24,11 @@ from .._base_converter import (
     DocumentSection,
     page_marker,
 )
-from .._exceptions import MissingDependencyException, MISSING_DEPENDENCY_MESSAGE
+from .._exceptions import (
+    MissingDependencyException,
+    MISSING_DEPENDENCY_MESSAGE,
+    ResourceLimitException,
+)
 from .._stream_info import StreamInfo
 from ..converter_utils._archive_limits import (
     ArchiveBudget,
@@ -31,6 +37,8 @@ from ..converter_utils._archive_limits import (
     get_budget,
     read_member,
 )
+from ..converter_utils._sheet_layout import Block, MergedRange, detect_blocks
+from ..converter_utils._xlsx_images import _relationships
 
 # Try loading optional (but in this case, required) dependencies
 # Save reporting of any exceptions for later
@@ -38,6 +46,8 @@ _xlsx_dependency_exc_info = None
 try:
     import pandas as pd
     import openpyxl  # noqa: F401
+    from pandas.errors import EmptyDataError
+    from pandas.io.parsers import TextParser
 except ImportError:
     _xlsx_dependency_exc_info = sys.exc_info()
 
@@ -263,9 +273,351 @@ def _frame_to_html(frame: Any) -> str:
     return _whole_numbers_as_ints(frame).to_html(index=False, na_rep="")
 
 
+# Accepted values for the ``sheet_layout`` option.
+#   auto:   find the tables on each sheet (titles, headers, several tables)
+#   simple: one table per sheet with the first row as its header
+SHEET_LAYOUTS = ("auto", "simple")
+
+_SPAN_TABLE_FORMATS = ("html", "auto")
+
+_MERGE_CELL = re.compile(
+    rb"<(?:\w+:)?mergeCell\s[^>]*?ref=\"([A-Za-z]{1,3})(\d{1,7})"
+    rb"(?::([A-Za-z]{1,3})(\d{1,7}))?\""
+)
+_MANGLED_LABEL = re.compile(r"^(.*)\.(\d+)$")
+
+# A sheet whose first cell is a title above its only table keeps the first-row
+# header it always had ("Title | Unnamed: 1"); output for such sheets is relied
+# on downstream. Set to False to caption the title and start the table at its
+# real header instead, as is already done on sheets with several tables.
+_FIRST_CELL_TITLE_STAYS_HEADER = False
+
+# Merged ranges read per sheet; a sheet with more keeps the first ones.
+_MAX_MERGED_RANGES = 20000
+
+
+def _sheet_layout_option(kwargs: Dict[str, Any]) -> str:
+    layout = kwargs.get("sheet_layout") or "auto"
+    if layout not in SHEET_LAYOUTS:
+        raise ValueError(
+            f"sheet_layout must be one of {', '.join(SHEET_LAYOUTS)}; got {layout!r}"
+        )
+    return layout
+
+
+def _column_index(letters: bytes) -> int:
+    index = 0
+    for letter in letters.upper():
+        index = index * 26 + letter - 64
+    return index - 1
+
+
+def _read_merged_ranges(
+    file_stream: BinaryIO, names: Sequence[str], budget: ArchiveBudget
+) -> Dict[str, List[MergedRange]]:
+    """Merged ranges of the named sheets, read from the worksheet parts.
+
+    The workbook is not loaded a second time: the ``<mergeCell>`` references
+    are picked out of each sheet part, read within the archive member limits.
+    The stream position is restored. A package that cannot be walked gives no
+    ranges; a limit hit is raised.
+    """
+    wanted = set(names)
+    merged: Dict[str, List[MergedRange]] = {}
+    position = file_stream.tell()
+    try:
+        with zipfile.ZipFile(file_stream) as archive:
+            workbook_part = next(
+                iter(_relationships(archive, "", "officeDocument").values())
+            )
+            parts = _relationships(archive, workbook_part)
+            root = ET.fromstring(archive.read(workbook_part))
+            for sheet in root.findall(f"{_SHEET_NS}sheets/{_SHEET_NS}sheet"):
+                name = sheet.get("name")
+                part = parts.get(sheet.get(_REL_NS + "id") or "")
+                if name not in wanted or part is None:
+                    continue
+                data = read_member(archive, archive.getinfo(part), budget)
+                start = data.find(b"mergeCell")
+                if start < 0:
+                    continue
+                ranges: List[MergedRange] = []
+                for match in _MERGE_CELL.finditer(data, max(start - 16, 0)):
+                    left, top, right, bottom = match.groups()
+                    first_row, first_column = int(top) - 1, _column_index(left)
+                    last_row = int(bottom) - 1 if bottom else first_row
+                    last_column = _column_index(right) if right else first_column
+                    ranges.append((first_row, first_column, last_row, last_column))
+                    if len(ranges) >= _MAX_MERGED_RANGES:
+                        break
+                if ranges:
+                    merged[name] = ranges
+    except ResourceLimitException:
+        raise
+    except Exception:
+        return {}
+    finally:
+        file_stream.seek(position)
+    return merged
+
+
+def _header_labels(columns: Sequence[Any]) -> List[Any]:
+    """The first row's cells, recovered from the column labels pandas made.
+
+    pandas names an empty header cell ``Unnamed: <position>`` and numbers
+    repeated labels (``Name``, ``Name.1``); both are undone here.
+    """
+    labels: List[Any] = []
+    seen: Dict[str, int] = {}
+    for position, label in enumerate(columns):
+        if isinstance(label, str):
+            if label == f"Unnamed: {position}":
+                labels.append(None)
+                continue
+            match = _MANGLED_LABEL.match(label)
+            if match and seen.get(match.group(1)) == int(match.group(2)):
+                label = match.group(1)
+            seen[label] = seen.get(label, 0) + 1
+        labels.append(label)
+    return labels
+
+
+def _frame_grid(frame: Any) -> List[List[Any]]:
+    """The sheet as rows of cell values (``None`` for empty), header row first."""
+    columns: List[List[Any]] = []
+    for position in range(frame.shape[1]):
+        series = frame.iloc[:, position]
+        blank = series.isna().tolist()
+        values = series.tolist()
+        kind = series.dtype.kind
+        if kind == "f":
+            # Integers were upcast to float by an empty cell in the column.
+            cells = [
+                None if empty else int(value) if _is_whole(value) else value
+                for value, empty in zip(values, blank)
+            ]
+        elif kind == "M":
+            cells = [
+                None if empty else value.to_pydatetime()
+                for value, empty in zip(values, blank)
+            ]
+        else:
+            cells = [None if empty else value for value, empty in zip(values, blank)]
+        columns.append(cells)
+    grid = [_header_labels(frame.columns.tolist())]
+    grid.extend(list(row) for row in zip(*columns))
+    return grid
+
+
+def _is_plain_table(frame: Any) -> bool:
+    """Whether the sheet is evidently one table with a full header row.
+
+    True when every header cell is text and no row or column is empty; such
+    a sheet needs no layout analysis.
+    """
+    if frame.shape[1] == 0:
+        return True
+    for position, label in enumerate(frame.columns.tolist()):
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or label == f"Unnamed: {position}"
+        ):
+            return False
+    if frame.shape[0] == 0:
+        return True
+    filled = frame.notna().to_numpy()
+    return bool(filled.any(axis=1).all() and filled.any(axis=0).all())
+
+
+def _label_text(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, datetime.datetime):
+        if value.time() == datetime.time(0):
+            return value.date().isoformat()
+        return value.isoformat(sep=" ")
+    return value
+
+
+def _caption_html(lines: Sequence[str]) -> str:
+    return "".join(f"<p><strong>{html.escape(line)}</strong></p>" for line in lines)
+
+
+Span = Tuple[int, int, int, int]  # table row, table column, rowspan, colspan
+
+
+def _table_spans(
+    merges: Sequence[MergedRange],
+    first_row: int,
+    header_row: Optional[int],
+    bottom: int,
+    left: int,
+    right: int,
+) -> List[Span]:
+    """Merged ranges as spans of the table whose first sheet row is ``first_row``.
+
+    Without a header row the table starts with a generated header, so its
+    rows are one further down. A range is clipped to the table, and a range
+    starting in the header row is clipped to that row.
+    """
+    shift = 1 if header_row is None else 0
+    spans: List[Span] = []
+    for top, low, last, high in merges:
+        if not (first_row <= top <= bottom and left <= low <= right):
+            continue
+        last = top if top == header_row else min(last, bottom)
+        high = min(high, right)
+        if last > top or high > low:
+            spans.append(
+                (top - first_row + shift, low - left, last - top + 1, high - low + 1)
+            )
+    return spans
+
+
+def _with_spans(table_html: str, spans: Sequence[Span]) -> str:
+    """Add ``rowspan``/``colspan`` to a rectangular HTML table.
+
+    The top-left cell of each span is extended and the cells it covers are
+    removed. Spans that overlap an earlier one are skipped.
+    """
+    if not spans:
+        return table_html
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(table_html, "html.parser")
+    rows = [row.find_all(["th", "td"], recursive=False) for row in soup.find_all("tr")]
+    covered: set[Tuple[int, int]] = set()
+    for row, column, rowspan, colspan in spans:
+        if row >= len(rows) or column >= len(rows[row]) or (row, column) in covered:
+            continue
+        cells = [
+            (r, c)
+            for r in range(row, min(row + rowspan, len(rows)))
+            for c in range(column, min(column + colspan, len(rows[r])))
+            if (r, c) != (row, column)
+        ]
+        if any(cell in covered for cell in cells):
+            continue
+        if rowspan > 1:
+            rows[row][column]["rowspan"] = str(rowspan)
+        if colspan > 1:
+            rows[row][column]["colspan"] = str(colspan)
+        covered.update(cells)
+    for r, c in covered:
+        rows[r][c].decompose()
+    return str(soup)
+
+
+def _block_html(
+    grid: List[List[Any]],
+    block: Block,
+    merges: Sequence[MergedRange],
+    spans: bool,
+) -> str:
+    """One detected table as HTML, typed and formatted like a whole sheet."""
+    left, right = block.left, block.right
+    body = [
+        ["" if value is None else value for value in grid[row][left : right + 1]]
+        for row in range(block.body_top, block.bottom + 1)
+    ]
+    try:
+        frame = TextParser(body, header=None, skip_blank_lines=False).read()
+    except EmptyDataError:
+        frame = pd.DataFrame(index=range(len(body)), columns=range(right - left + 1))
+    if block.header is None:
+        frame.columns = [f"Column {number}" for number in range(1, frame.shape[1] + 1)]
+    else:
+        frame.columns = [
+            _label_text(value) for value in grid[block.header][left : right + 1]
+        ]
+    table_html = _frame_to_html(frame)
+    if spans and merges:
+        first_row = block.top if block.header is None else block.header
+        table_html = _with_spans(
+            table_html,
+            _table_spans(merges, first_row, block.header, block.bottom, left, right),
+        )
+    return table_html
+
+
+def _is_first_row_table(blocks: Sequence[Block]) -> bool:
+    """Whether the sheet is rendered as one table headed by its first row."""
+    if blocks[0].top != 0 or blocks[0].left != 0:
+        return False
+    if len(blocks) == 1 and (blocks[0].kind == "text" or blocks[0].header in (None, 0)):
+        return True
+    if not _FIRST_CELL_TITLE_STAYS_HEADER:
+        return False
+    # Title lines in the first column, then exactly one table below them.
+    tables = [block for block in blocks if block.kind == "table"]
+    return len(tables) == 1 and all(
+        block.left == 0 and (block is tables[0] or block.bottom < tables[0].top)
+        for block in blocks
+    )
+
+
+def _sheet_fragments(
+    frame: Any,
+    merges: Sequence[MergedRange] = (),
+    layout: str = "auto",
+    spans: bool = False,
+) -> List[str]:
+    """HTML fragments for one sheet: one per table or text block, in order.
+
+    With ``layout="simple"``, and for a sheet that is one table starting in
+    its first cell, this is the single table pandas read, with the first row
+    as header (see also ``_FIRST_CELL_TITLE_STAYS_HEADER``). Otherwise each
+    detected block becomes a fragment: its title lines in bold, then its
+    table. A table without a header row gets ``Column 1``, ``Column 2``, ...
+    as header; empty cells of a detected header stay empty. With ``spans``,
+    merged ranges become ``rowspan``/``colspan``.
+    """
+    if layout == "simple" or (not merges and _is_plain_table(frame)):
+        return [_frame_to_html(frame)]
+
+    grid = _frame_grid(frame)
+    blocks = detect_blocks(grid, merges)
+    if not blocks or _is_first_row_table(blocks):
+        shown = frame
+        if (
+            len(blocks) == 1
+            and blocks[0].header == 0
+            and blocks[0].header_strength == "strong"
+            and None in grid[0]
+        ):
+            # A real header with gaps: the gaps are empty cells, not names.
+            shown = frame.copy(deep=False)
+            shown.columns = [
+                "" if cell is None else label
+                for cell, label in zip(grid[0], frame.columns.tolist())
+            ]
+        table_html = _frame_to_html(shown)
+        if spans and merges:
+            table_html = _with_spans(
+                table_html,
+                _table_spans(merges, 0, 0, len(grid) - 1, 0, frame.shape[1] - 1),
+            )
+        return [table_html]
+
+    fragments: List[str] = []
+    for block in blocks:
+        caption = _caption_html(block.titles)
+        if block.kind == "text":
+            fragments.append(caption)
+        else:
+            fragments.append(caption + _block_html(grid, block, merges, spans))
+    return fragments
+
+
 class XlsxConverter(DocumentConverter):
     """
     Converts XLSX files to Markdown, with each sheet presented as a separate Markdown table.
+
+    A sheet that holds several tables (stacked or side by side), titles above
+    a table, or a table that does not start in the first cell is laid out
+    table by table; ``sheet_layout="simple"`` restores one table per sheet
+    with the first row as header.
 
     The workbook is checked against the archive resource limits before any
     part is read; a hit raises ``ResourceLimitException``.
@@ -317,6 +669,8 @@ class XlsxConverter(DocumentConverter):
 
         include_hidden = bool(kwargs.get("include_hidden_sheets", False))
         markers = bool(kwargs.get("page_markers", False))
+        layout = _sheet_layout_option(kwargs)
+        spans = kwargs.get("table_format") in _SPAN_TABLE_FORMATS
         states, props = _read_workbook_info(file_stream)
         wanted, hidden = _select_sheets(states, include_hidden)
 
@@ -332,15 +686,23 @@ class XlsxConverter(DocumentConverter):
 
                 images = _XlsxImages(workbook_stream)
 
+            merged: Dict[str, List[MergedRange]] = {}
+            if layout == "auto" and sheets:
+                merged = _read_merged_ranges(
+                    workbook_stream, [str(s) for s in sheets], budget
+                )
+
             for index, s in enumerate(sheets, start=1):
                 chunk = f"## {s}\n"
-                html_content = _frame_to_html(sheets[s])
-                chunk += (
-                    self._html_converter.convert_string(
-                        html_content, **kwargs
-                    ).markdown.strip()
-                    + "\n\n"
-                )
+                for html_content in _sheet_fragments(
+                    sheets[s], merged.get(str(s), ()), layout, spans
+                ):
+                    chunk += (
+                        self._html_converter.convert_string(
+                            html_content, **kwargs
+                        ).markdown.strip()
+                        + "\n\n"
+                    )
                 if images is not None:
                     image_content = images.to_html(s, self._image_to_html, kwargs)
                     if image_content:
@@ -394,9 +756,33 @@ class XlsxConverter(DocumentConverter):
         return None
 
 
+def _read_xls_merged_ranges(contents: bytes) -> Dict[str, List[MergedRange]]:
+    """Merged ranges per sheet of a legacy workbook.
+
+    xlrd only records them when the workbook is opened with its formatting,
+    so the file is parsed once more; this is done only when spans are wanted.
+    A workbook xlrd cannot open that way gives no ranges.
+    """
+    try:
+        book = xlrd.open_workbook(file_contents=contents, formatting_info=True)
+        return {
+            sheet.name: [
+                (top, left, bottom - 1, right - 1)
+                for top, bottom, left, right in sheet.merged_cells[:_MAX_MERGED_RANGES]
+            ]
+            for sheet in book.sheets()
+            if sheet.merged_cells
+        }
+    except Exception:
+        return {}
+
+
 class XlsConverter(DocumentConverter):
     """
     Converts XLS files to Markdown, with each sheet presented as a separate Markdown table.
+
+    Sheets are laid out as for XLSX (see ``sheet_layout``). Merged cells are
+    only read for ``table_format="html"`` or ``"auto"``.
     """
 
     def __init__(self):
@@ -441,11 +827,14 @@ class XlsConverter(DocumentConverter):
 
         include_hidden = bool(kwargs.get("include_hidden_sheets", False))
         markers = bool(kwargs.get("page_markers", False))
+        layout = _sheet_layout_option(kwargs)
+        spans = kwargs.get("table_format") in _SPAN_TABLE_FORMATS
 
         # Open the book once with xlrd so sheet visibility is known, then hand
         # the same Book to pandas. xlrd visibility: 0 visible, 1 hidden,
         # 2 very hidden.
-        book = xlrd.open_workbook(file_contents=file_stream.read())
+        contents = file_stream.read()
+        book = xlrd.open_workbook(file_contents=contents)
         states: List[Tuple[str, str]] = []
         for index in range(book.nsheets):
             visibility = getattr(book.sheet_by_index(index), "visibility", 0)
@@ -459,17 +848,22 @@ class XlsConverter(DocumentConverter):
             if wanted == []
             else pd.read_excel(book, sheet_name=wanted, engine="xlrd")
         )
+        merged: Dict[str, List[MergedRange]] = {}
+        if layout == "auto" and spans and sheets:
+            merged = _read_xls_merged_ranges(contents)
         md_content = ""
         sections: List[DocumentSection] = []
         for index, s in enumerate(sheets, start=1):
             chunk = f"## {s}\n"
-            html_content = _frame_to_html(sheets[s])
-            chunk += (
-                self._html_converter.convert_string(
-                    html_content, **kwargs
-                ).markdown.strip()
-                + "\n\n"
-            )
+            for html_content in _sheet_fragments(
+                sheets[s], merged.get(str(s), ()), layout, spans
+            ):
+                chunk += (
+                    self._html_converter.convert_string(
+                        html_content, **kwargs
+                    ).markdown.strip()
+                    + "\n\n"
+                )
             if markers:
                 md_content += page_marker(index, "sheet") + "\n"
             md_content += chunk

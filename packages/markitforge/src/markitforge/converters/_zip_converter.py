@@ -119,8 +119,9 @@ class ZipConverter(DocumentConverter):
         budget is spent, conversion stops and the members converted so far
         are returned. Warnings of nested members are passed up, prefixed with
         the member name. Every byte extracted at any level counts towards
-        ``max_archive_bytes``, so a nested archive counts both as a member of
-        its parent and through its own members.
+        ``max_archive_bytes``. A member that is an archive itself (a nested
+        ZIP, or a DOCX/XLSX/PPTX/EPUB package) is counted once: what it
+        holds is charged only beyond the size already charged for the member.
         """
         file_path = (
             stream_info.url
@@ -172,14 +173,15 @@ class ZipConverter(DocumentConverter):
 
                     result: Optional[DocumentConverterResult] = None
                     try:
-                        result = self._markitforge.convert_stream(
-                            stream=io.BytesIO(data),
-                            stream_info=StreamInfo(
-                                extension=os.path.splitext(name)[1],
-                                filename=os.path.basename(name),
-                            ),
-                            **member_kwargs,
-                        )
+                        with budget.prepaid(entry.file_size):
+                            result = self._markitforge.convert_stream(
+                                stream=io.BytesIO(data),
+                                stream_info=StreamInfo(
+                                    extension=os.path.splitext(name)[1],
+                                    filename=os.path.basename(name),
+                                ),
+                                **member_kwargs,
+                            )
                     except UnsupportedFormatException:
                         pass
                     except ResourceLimitException as exc:

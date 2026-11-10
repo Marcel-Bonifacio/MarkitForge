@@ -12,15 +12,35 @@ Backends (``pdf_backend``):
 - "pdfplumber": the same analysis, but errors are raised.
 - "pdfminer": plain text only (the original MarkItDown behaviour).
 - "docling": IBM docling, when installed.
+
+Layout options of the pdfplumber analysis (all on by default):
+- ``pdf_reading_order``: "xycut" (recursive XY-cut over word boxes; handles
+  multi-column pages) or "simple" (top to bottom, left to right).
+- ``pdf_reflow``: join hard-wrapped lines into paragraphs and undo
+  end-of-line hyphenation.
+- ``pdf_strip_headers_footers``: drop running headers and footers; what was
+  removed is listed in ``metadata["removed_headers_footers"]``.
+- ``pdf_outline_headings``: take headings from the PDF outline (bookmarks)
+  or heading tags when the document has them.
+- ``pdf_merge_tables``: merge tables continued on the next page.
+
+Other options: ``table_format`` ("markdown", "html" or "auto": HTML only
+for tables with merged cells) and ``pdf_inline_math`` (off by default:
+write inline formulas as ``$...$``).
+
+``pdf_reading_order="simple"`` with ``pdf_reflow=False`` gives the earlier
+line-by-line output; ``pdf_backend="pdfminer"`` skips layout analysis
+altogether.
 """
 
 import io
 import logging
 import re
 import sys
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple
 
 from .._base_converter import (
     DocumentAsset,
@@ -37,29 +57,47 @@ from .._exceptions import (
 )
 from ..converter_utils._text_safety import neutralize_page_markers
 from ..converter_utils.pdf._docling import convert_with_docling
+from ..converter_utils.pdf import _tables as _pdf_tables
+from ..converter_utils.pdf._furniture import (
+    MIN_PAGES as FURNITURE_MIN_PAGES,
+    PageLines,
+    find_furniture,
+    strip_furniture,
+    strip_furniture_text,
+)
 from ..converter_utils.pdf._layout import (
     Block,
-    HeadingLevels,
+    Flow,
+    OutlineEntry,
     TextLine,
     annotate_headings,
-    body_font_size,
+    assign_headings,
     extract_lines,
-    heading_runs,
+    heading_list,
     is_math_font,
-    render_page,
+    simple_flow,
 )
-from ..converter_utils.pdf._metadata import build_metadata, read_metadata
+from ..converter_utils.pdf._metadata import (
+    build_metadata,
+    read_metadata,
+    read_outline,
+)
+from ..converter_utils.pdf._reading_order import layout_page
+from ..converter_utils.pdf._reflow import build_vocabulary, render_flow
 from ..converter_utils.pdf._tables import (
+    PageTable,
     find_page_tables,
     point_in_bboxes,
-    render_markdown_table,
+    render_table,
 )
 from ..converter_utils.pdf._visual import (
     DEFAULT_MAX_LLM_CALLS,
     DEFAULT_MAX_RENDER_PIXELS,
     VisualBudget,
     describe_page_images,
+    apply_inline_math,
     find_math_regions,
+    page_images,
     transcribe_math_regions,
 )
 from ._llm_caption import llm_caption
@@ -67,6 +105,7 @@ from ._llm_caption import llm_caption
 logger = logging.getLogger(__name__)
 
 PDF_BACKENDS = ("auto", "pdfplumber", "pdfminer", "docling")
+PDF_READING_ORDERS = ("xycut", "simple")
 
 # Documents with more pages are refused (max_pdf_pages; 0 = unlimited).
 DEFAULT_MAX_PDF_PAGES = 5000
@@ -577,6 +616,11 @@ def _limit(kwargs: Dict[str, Any], name: str, default: int) -> int:
     return number
 
 
+def _flag(kwargs: Dict[str, Any], name: str, default: bool) -> bool:
+    value = kwargs.get(name)
+    return default if value is None else bool(value)
+
+
 @dataclass
 class _Options:
     """Conversion options taken from convert() keyword arguments."""
@@ -590,9 +634,22 @@ class _Options:
     max_render_pixels: int = DEFAULT_MAX_RENDER_PIXELS
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
     max_pdf_pages: int = DEFAULT_MAX_PDF_PAGES
+    reading_order: str = "xycut"
+    reflow: bool = True
+    strip_furniture: bool = True
+    outline_headings: bool = True
+    merge_tables: bool = True
+    table_format: str = "markdown"
+    inline_math: bool = False
 
     @classmethod
     def from_kwargs(cls, kwargs: Dict[str, Any]) -> "_Options":
+        order = str(kwargs.get("pdf_reading_order") or "xycut").strip().lower()
+        if order not in PDF_READING_ORDERS:
+            raise ValueError(
+                f"Unknown pdf_reading_order {order!r}; use one of: "
+                + ", ".join(PDF_READING_ORDERS)
+            )
         return cls(
             page_markers=bool(kwargs.get("page_markers", False)),
             describe_images=bool(kwargs.get("describe_images", False)),
@@ -605,6 +662,13 @@ class _Options:
             ),
             max_llm_calls=_limit(kwargs, "max_llm_calls", DEFAULT_MAX_LLM_CALLS),
             max_pdf_pages=_limit(kwargs, "max_pdf_pages", DEFAULT_MAX_PDF_PAGES),
+            reading_order=order,
+            reflow=_flag(kwargs, "pdf_reflow", True),
+            strip_furniture=_flag(kwargs, "pdf_strip_headers_footers", True),
+            outline_headings=_flag(kwargs, "pdf_outline_headings", True),
+            merge_tables=_flag(kwargs, "pdf_merge_tables", True),
+            table_format=str(kwargs.get("table_format") or "markdown"),
+            inline_math=_flag(kwargs, "pdf_inline_math", False),
         )
 
     @property
@@ -619,20 +683,27 @@ class _Options:
     def can_transcribe(self) -> bool:
         return self.transcribe_formulas and self.has_llm
 
+    @property
+    def legacy_text(self) -> bool:
+        """Line-by-line output as before reading order and reflow existed:
+        plain pages take their text from pdfminer."""
+        return self.reading_order == "simple" and not self.reflow
+
 
 @dataclass
 class _PageRecord:
     """What one page produced; pages are closed before Markdown is assembled.
 
     kind is "form" (legacy form heuristics), "structured" (tables, images or
-    formulas placed among text lines) or "plain" (text only).
+    formulas placed among text lines) or "plain" (text only). ``flow`` holds
+    the lines and blocks of a non-form page in reading order.
     """
 
     index: int
     kind: str
     text: str = ""
-    lines: List[TextLine] = field(default_factory=list)
-    blocks: List[Block] = field(default_factory=list)
+    flow: Flow = field(default_factory=list)
+    height: float = 0.0
 
 
 @dataclass
@@ -641,6 +712,8 @@ class _State:
 
     sizes: Counter = field(default_factory=Counter)
     scan_pages: List[int] = field(default_factory=list)
+    garbled_pages: List[int] = field(default_factory=list)
+    sparse_pages: List[int] = field(default_factory=list)
     math_pages: List[int] = field(default_factory=list)
     assets: List[DocumentAsset] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -661,13 +734,95 @@ def _page_list(pages: List[int]) -> str:
     return ", ".join(spans)
 
 
-def _scan_warnings(pages: List[int]) -> List[str]:
-    hint = "Try the markitforge-ocr plugin."
+_OCR_HINT = "Try the markitforge-ocr plugin."
+
+
+def _layer_warnings(pages: List[int], one: str, many: str) -> List[str]:
+    """One warning per page, or a single merged one for many pages."""
     if not pages:
         return []
     if len(pages) <= _MAX_SCAN_WARNINGS:
-        return [f"Page {p} has no text layer; it may be a scan. {hint}" for p in pages]
-    return [f"Pages {_page_list(pages)} have no text layer; they may be scans. {hint}"]
+        return [f"Page {p} {one} {_OCR_HINT}" for p in pages]
+    return [f"Pages {_page_list(pages)} {many} {_OCR_HINT}"]
+
+
+def _scan_warnings(pages: List[int]) -> List[str]:
+    return _layer_warnings(
+        pages,
+        "has no text layer; it may be a scan.",
+        "have no text layer; they may be scans.",
+    )
+
+
+def _garbled_warnings(pages: List[int]) -> List[str]:
+    return _layer_warnings(
+        pages,
+        "has an unreadable text layer (garbled characters); it may be a scan.",
+        "have unreadable text layers (garbled characters); they may be scans.",
+    )
+
+
+def _sparse_warnings(pages: List[int]) -> List[str]:
+    return _layer_warnings(
+        pages,
+        "has almost no text over a full-page image; it may be a scan.",
+        "have almost no text over full-page images; they may be scans.",
+    )
+
+
+# A text layer is garbled when at least this share of its characters (and at
+# least _GARBLED_MIN_CHARS of them) are unmapped glyphs, replacement
+# characters, controls or private-use code points.
+_GARBLED_SHARE = 0.5
+_GARBLED_MIN_CHARS = 10
+# A page is a scan with a stray text layer when one image covers this share
+# of it while all characters together cover less than _SPARSE_TEXT_SHARE.
+_FULL_PAGE_IMAGE_SHARE = 0.8
+_SPARSE_TEXT_SHARE = 0.005
+_BAD_CATEGORIES = {"Cc", "Cs", "Co", "Cn"}
+
+
+def _is_garbled(texts: Sequence[str]) -> bool:
+    """Whether the visible characters of a page are mostly unreadable."""
+    if len(texts) < _GARBLED_MIN_CHARS:
+        return False
+    cache: Dict[str, bool] = {}
+    bad = 0
+    for text in texts:
+        flag = cache.get(text)
+        if flag is None:
+            flag = (
+                text.startswith("(cid:")
+                or "\ufffd" in text
+                or any(unicodedata.category(ch) in _BAD_CATEGORIES for ch in text)
+            )
+            cache[text] = flag
+        bad += flag
+    return bad >= _GARBLED_SHARE * len(texts)
+
+
+def _is_sparse_over_image(page: Any, visible: Sequence[Dict[str, Any]]) -> bool:
+    """A full-page image with only a sliver of text on top (a stamp, a
+    page number): the real content is in the picture."""
+    try:
+        width, height = float(page.width), float(page.height)
+        area = width * height
+        if area <= 0:
+            return False
+        largest = 0.0
+        for img in page.images:
+            w = min(float(img["x1"]), width) - max(float(img["x0"]), 0.0)
+            h = min(float(img["bottom"]), height) - max(float(img["top"]), 0.0)
+            largest = max(largest, max(w, 0.0) * max(h, 0.0))
+        if largest < _FULL_PAGE_IMAGE_SHARE * area:
+            return False
+        text_area = sum(
+            (float(c["x1"]) - float(c["x0"])) * (float(c["bottom"]) - float(c["top"]))
+            for c in visible
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return text_area < _SPARSE_TEXT_SHARE * area
 
 
 def _check_page_count(pdf_bytes: io.BytesIO, max_pages: int) -> None:
@@ -713,12 +868,110 @@ def _split_pdfminer_pages(raw: str) -> List[str]:
     return parts
 
 
+def _place_formulas(
+    flow: Flow, lines: Sequence[TextLine], done: Sequence[Tuple[Any, Block]]
+) -> Flow:
+    """Put transcribed formulas where their lines were in the flow."""
+    replace: Dict[int, Optional[Block]] = {}
+    for region, block in done:
+        covered = lines[region.start : region.end]
+        if not covered:
+            continue
+        block.x1 = max(line.x1 for line in covered)
+        block.bottom = max(line.bottom for line in covered)
+        replace[id(covered[0])] = block
+        for line in covered[1:]:
+            replace[id(line)] = None
+    out: Flow = []
+    for item in flow:
+        if id(item) in replace:
+            block_or_none = replace[id(item)]
+            if block_or_none is not None:
+                out.append(block_or_none)
+        else:
+            out.append(item)
+    return out
+
+
+def _replace_lines(
+    flow: Flow, old: Sequence[TextLine], new: Sequence[TextLine]
+) -> Flow:
+    """Swap rewritten lines into a flow.
+
+    ``new`` is ``old`` with some lines replaced by fresh objects and some
+    dropped (folded into a neighbour), in the same order. A replacement takes
+    the place of the first old line it covers.
+    """
+    kept = {id(x) for x in new}
+    known = {id(x) for x in old}
+    fresh = [x for x in new if id(x) not in known]
+    placed: Dict[int, TextLine] = {}
+    used = set()
+    for line in old:
+        if id(line) in kept:
+            continue
+        cx, cy = (line.x0 + line.x1) / 2, (line.top + line.bottom) / 2
+        for k, cand in enumerate(fresh):
+            if (
+                k not in used
+                and cand.x0 - 1 <= cx <= cand.x1 + 1
+                and cand.top - 1 <= cy <= cand.bottom + 1
+            ):
+                placed[id(line)] = cand
+                used.add(k)
+                break
+    out: Flow = []
+    for item in flow:
+        if not isinstance(item, TextLine) or id(item) in kept or id(item) not in known:
+            out.append(item)
+        elif id(item) in placed:
+            out.append(placed[id(item)])
+    # Anything that could not be placed keeps its text at the end of the page.
+    out.extend(cand for k, cand in enumerate(fresh) if k not in used)
+    return out
+
+
+# A detected table with a cell longer than this is a layout frame around
+# prose, not data; such pages keep the form heuristics.
+_MAX_DATA_CELL_CHARS = 80
+_SEPARATOR_ROW_RE = re.compile(r"^\|[\s|:-]+\|$")
+
+
+def _tables_cover_form(form_markdown: str, tables: Sequence[PageTable]) -> bool:
+    """Whether the detected tables account for every table row the form
+    heuristics produced.
+
+    The form heuristics turn any aligned rows into tables, which suits real
+    forms (label/value grids all over the page). On a page whose only
+    tabular content is the tables found by table detection, the detected
+    tables are the better rendering (wrapped cells and merged headers stay
+    in their rows) and the rest of the page is laid out as text.
+    """
+    if not tables:
+        return False
+    cells = [cell for t in tables for row in t.rows for cell in row if cell]
+    if not cells or max(len(cell) for cell in cells) > _MAX_DATA_CELL_CHARS:
+        return False
+    haystack = " ".join(" ".join(cell.replace("\\|", "|").split()) for cell in cells)
+    for line in form_markdown.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or _SEPARATOR_ROW_RE.match(line):
+            continue
+        for cell in line.strip("|").split("|"):
+            text = " ".join(cell.split())
+            if text and text not in haystack:
+                return False
+    return True
+
+
 class PdfConverter(DocumentConverter):
     """
     Converts PDFs to Markdown.
 
-    Finds ruled (and clearly aligned) tables on every page, infers headings
-    from font size, keeps the form-style heuristics for form pages, and fills
+    Finds ruled (and clearly aligned) tables on every page, orders text with
+    a recursive XY-cut, rebuilds paragraphs, drops running headers and
+    footers, takes headings from the outline or infers them from fonts and
+    spacing, keeps the form-style heuristics for form pages, and fills
     ``pages``, ``metadata`` and ``warnings`` on the result. Optional LLM
     features describe images and transcribe formulas to LaTeX.
     """
@@ -854,7 +1107,7 @@ class PdfConverter(DocumentConverter):
     def _convert_pdfplumber(
         self, pdf_bytes: io.BytesIO, opts: _Options
     ) -> DocumentConverterResult:
-        """Layout-aware conversion, one page at a time."""
+        """Layout-aware conversion in one pass over the pages."""
         state = _State(
             visual=VisualBudget(
                 max_llm_calls=opts.max_llm_calls,
@@ -862,41 +1115,159 @@ class PdfConverter(DocumentConverter):
             )
         )
         records: List[_PageRecord] = []
+        outline: List[OutlineEntry] = []
         # page.close() after each page frees pdfplumber's cached objects and
-        # keeps memory flat regardless of page count; only text survives.
+        # keeps memory flat regardless of page count; only text lines survive.
         with pdfplumber.open(pdf_bytes) as pdf:
             info = dict(pdf.metadata or {})
+            page_ids: Dict[int, int] = {}
             for page_idx, page in enumerate(pdf.pages):
                 try:
+                    page_id = getattr(getattr(page, "page_obj", None), "pageid", None)
+                    if page_id is not None:
+                        page_ids[page_id] = page_idx + 1
                     records.append(self._process_page(page, page_idx + 1, opts, state))
                 finally:
                     page.close()  # Free cached page data immediately
+            if opts.outline_headings:
+                outline = [
+                    OutlineEntry(level, title, page_no)
+                    for level, title, page_no in read_outline(pdf.doc, page_ids)
+                ]
 
-        body = body_font_size(state.sizes)
-        runs = {
-            r.index: heading_runs(r.lines, body) for r in records if r.kind != "form"
-        }
-        levels = HeadingLevels(
-            first.style_key
-            for page_runs in runs.values()
-            for _s, _e, first in page_runs
+        text_records = [r for r in records if r.kind != "form"]
+        flows: Dict[int, Flow] = {r.index: r.flow for r in text_records}
+
+        # Running headers and footers, judged over the whole document.
+        furniture: Dict[Tuple[str, str], str] = {}
+        removed: List[str] = []
+        if opts.strip_furniture and len(records) >= FURNITURE_MIN_PAGES:
+            page_lines = [PageLines(r.index, r.height, r.flow) for r in text_records]
+            furniture = find_furniture(page_lines)
+            removed = strip_furniture(page_lines, furniture)
+
+        assign_headings(flows, state.sizes, outline)
+
+        texts: Dict[int, str] = {}
+        raw: Optional[str] = None
+        parts: List[str] = []
+        all_plain = False
+        if opts.legacy_text:
+            raw, parts, all_plain = self._legacy_plain_texts(
+                pdf_bytes, records, furniture, texts
+            )
+        vocab = None
+        if opts.reflow:
+            vocab = build_vocabulary(
+                x.text
+                for flow in flows.values()
+                for x in flow
+                if isinstance(x, TextLine)
+            )
+
+        sections: List[DocumentSection] = []
+        chunks: List[str] = []
+        for rec in records:
+            if rec.kind == "form":
+                md = rec.text
+            elif rec.index in texts:
+                md = texts[rec.index]
+            else:
+                md = render_flow(rec.flow, reflow=opts.reflow, vocab=vocab)
+            chunks.append(md if rec.kind == "form" else md.strip())
+            sections.append(
+                DocumentSection(
+                    index=rec.index,
+                    # Page text must not forge the markers join_sections adds.
+                    markdown=neutralize_page_markers(
+                        _merge_partial_numbering_lines(md.strip())
+                    ),
+                    kind="page",
+                )
+            )
+
+        if all_plain and raw is not None:
+            # Same text as plain pdfminer extraction, plus any headings.
+            plain = [r for r in records if r.kind == "plain"]
+            for i, rec in enumerate(plain):
+                if i < len(parts):
+                    parts[i] = texts[rec.index]
+            markdown = "\x0c".join(parts)
+        else:
+            markdown = "\n\n".join(c for c in chunks if c.strip()).strip()
+            if not markdown and raw is None and not state.sizes:
+                logger.debug("No text from pdfplumber; trying pdfminer.")
+                pdf_bytes.seek(0)
+                markdown = pdfminer.high_level.extract_text(pdf_bytes)
+
+        # Merge MasterFormat-style partial numbering with the following text
+        markdown = _merge_partial_numbering_lines(markdown)
+
+        if opts.merge_tables:
+            merged = self._merge_tables(sections)
+            if merged is not None:
+                sections = merged
+                markdown = "\n\n".join(
+                    s.markdown.strip() for s in sections if s.markdown.strip()
+                )
+        if opts.page_markers:
+            markdown = join_sections(sections, markers=True)
+
+        metadata = build_metadata(info, len(records))
+        if removed:
+            metadata["removed_headers_footers"] = removed
+        warnings = (
+            _scan_warnings(state.scan_pages)
+            + _garbled_warnings(state.garbled_pages)
+            + _sparse_warnings(state.sparse_pages)
+            + state.warnings
+        )
+        warnings.extend(self._option_warnings(opts, state))
+        return DocumentConverterResult(
+            markdown=markdown,
+            title=metadata.get("title"),
+            metadata=metadata,
+            pages=sections,
+            assets=state.assets,
+            warnings=warnings,
         )
 
-        def headings_for(rec: _PageRecord) -> List[Tuple[str, int]]:
-            return [
-                (
-                    " ".join(line.text for line in rec.lines[start:end]),
-                    levels.level(first.style_key),
-                )
-                for start, end, first in runs.get(rec.index, [])
-            ]
+    @staticmethod
+    def _merge_tables(
+        sections: List[DocumentSection],
+    ) -> Optional[List[DocumentSection]]:
+        """Merge tables continued across pages; None when nothing changed."""
+        merge = getattr(_pdf_tables, "merge_continued_tables", None)
+        if not callable(merge):
+            return None
+        before = [(s.index, s.markdown) for s in sections]
+        try:
+            merged = list(merge(sections))
+        except Exception as exc:
+            logger.debug("Could not merge continued tables: %s", exc, exc_info=True)
+            return None
+        if [(s.index, s.markdown) for s in merged] == before:
+            return None
+        return merged
 
-        # Text for plain pages. Without form pages, pdfminer gives better word
-        # spacing; documents with form pages keep pdfplumber text.
+    @staticmethod
+    def _legacy_plain_texts(
+        pdf_bytes: io.BytesIO,
+        records: List[_PageRecord],
+        furniture: Dict[Tuple[str, str], str],
+        texts: Dict[int, str],
+    ) -> Tuple[Optional[str], List[str], bool]:
+        """Text of plain pages for line-by-line output (``legacy_text``).
+
+        Without form pages, pdfminer gives better word spacing than
+        pdfplumber's own text; documents with form pages keep pdfplumber
+        text. Fills ``texts`` and returns (raw pdfminer text, its pages,
+        whether every page is plain).
+        """
         plain = [r for r in records if r.kind == "plain"]
         all_plain = bool(records) and len(plain) == len(records)
         has_form = any(r.kind == "form" for r in records)
-        texts: Dict[int, str] = {r.index: r.text for r in plain}
+        texts.update({r.index: r.text for r in plain})
         raw: Optional[str] = None
         parts: List[str] = []
         if plain and not has_form:
@@ -918,58 +1289,9 @@ class PdfConverter(DocumentConverter):
                 if i < len(parts):
                     texts[rec.index] = parts[i]
         for rec in plain:
-            texts[rec.index] = annotate_headings(texts[rec.index], headings_for(rec))
-
-        sections: List[DocumentSection] = []
-        chunks: List[str] = []
-        for rec in records:
-            if rec.kind == "form":
-                md = rec.text
-            elif rec.kind == "structured":
-                md = render_page(rec.lines, rec.blocks, body, levels)
-            else:
-                md = texts[rec.index]
-            chunks.append(md if rec.kind == "form" else md.strip())
-            sections.append(
-                DocumentSection(
-                    index=rec.index,
-                    # Page text must not forge the markers join_sections adds.
-                    markdown=neutralize_page_markers(
-                        _merge_partial_numbering_lines(md.strip())
-                    ),
-                    kind="page",
-                )
-            )
-
-        if all_plain and raw is not None:
-            # Same text as plain pdfminer extraction, plus any headings.
-            for i, rec in enumerate(plain):
-                if i < len(parts):
-                    parts[i] = texts[rec.index]
-            markdown = "\x0c".join(parts)
-        else:
-            markdown = "\n\n".join(c for c in chunks if c.strip()).strip()
-            if not markdown and raw is None:
-                logger.debug("No text from pdfplumber; trying pdfminer.")
-                pdf_bytes.seek(0)
-                markdown = pdfminer.high_level.extract_text(pdf_bytes)
-
-        # Merge MasterFormat-style partial numbering with the following text
-        markdown = _merge_partial_numbering_lines(markdown)
-        if opts.page_markers:
-            markdown = join_sections(sections, markers=True)
-
-        metadata = build_metadata(info, len(records))
-        warnings = _scan_warnings(state.scan_pages) + state.warnings
-        warnings.extend(self._option_warnings(opts, state))
-        return DocumentConverterResult(
-            markdown=markdown,
-            title=metadata.get("title"),
-            metadata=metadata,
-            pages=sections,
-            assets=state.assets,
-            warnings=warnings,
-        )
+            text = strip_furniture_text(texts[rec.index], furniture)
+            texts[rec.index] = annotate_headings(text, heading_list(rec.flow))
+        return raw, parts, all_plain
 
     # -- per page -----------------------------------------------------------
 
@@ -977,16 +1299,23 @@ class PdfConverter(DocumentConverter):
         self, page: Any, page_no: int, opts: _Options, state: _State
     ) -> _PageRecord:
         """Analyse one open page; everything that needs the page happens here."""
-        visible = [c for c in page.chars if str(c.get("text", "")).strip()]
+        chars = page.chars
+        visible = [c for c in chars if str(c.get("text", "")).strip()]
         state.sizes.update(round(float(c.get("size", 0.0)), 1) for c in visible)
-        if not visible and page.images:
-            state.scan_pages.append(page_no)
+        if not visible:
+            if page.images:
+                state.scan_pages.append(page_no)
+        elif _is_garbled([str(c.get("text", "")) for c in visible]):
+            state.garbled_pages.append(page_no)
+        elif page.images and _is_sparse_over_image(page, visible):
+            state.sparse_pages.append(page_no)
         math_chars = sum(1 for c in visible if is_math_font(c.get("fontname", "")))
         if math_chars >= _MATH_WARNING_MIN_CHARS:
             state.math_pages.append(page_no)
 
         form_content = _extract_form_content_from_words(page)
-        if form_content is not None:
+        tables = find_page_tables(page)
+        if form_content is not None and not _tables_cover_form(form_content, tables):
             if opts.can_describe:
                 images = self._describe_images(page, page_no, opts, state)
                 if images:
@@ -995,40 +1324,93 @@ class PdfConverter(DocumentConverter):
                     )
             return _PageRecord(page_no, "form", text=form_content)
 
-        tables = find_page_tables(page)
-        text_page = page
-        if tables:
-            bboxes = [t.bbox for t in tables]
-            text_page = page.filter(lambda obj: not point_in_bboxes(obj, bboxes))
-        lines = extract_lines(text_page)
+        bboxes = [t.bbox for t in tables]
         blocks = [
-            Block(top=t.bbox[1], x0=t.bbox[0], markdown=render_markdown_table(t.rows))
+            Block(
+                top=t.bbox[1],
+                x0=t.bbox[0],
+                markdown=render_table(t, opts.table_format),
+                x1=t.bbox[2],
+                bottom=t.bbox[3],
+            )
             for t in tables
         ]
         if opts.can_describe:
             blocks.extend(self._describe_images(page, page_no, opts, state))
-        if math_chars and opts.can_transcribe:
-            regions = find_math_regions(lines)
+
+        text_chars = (
+            [c for c in chars if not point_in_bboxes(c, bboxes)] if bboxes else chars
+        )
+        if opts.reading_order == "xycut":
+            flow = layout_page(text_chars, self._with_image_boxes(page, blocks))
+        else:
+            text_page = page
+            if bboxes:
+                text_page = page.filter(lambda obj: not point_in_bboxes(obj, bboxes))
+            flow = simple_flow(extract_lines(text_page), blocks)
+
+        if opts.can_transcribe:
+            lines = [x for x in flow if isinstance(x, TextLine)]
             done = transcribe_math_regions(
                 page,
                 page_no,
-                regions,
+                find_math_regions(lines, text_chars),
                 client=opts.llm_client,
                 model=str(opts.llm_model),
                 caption_fn=llm_caption,
                 warnings=state.warnings,
                 budget=state.visual,
             )
-            replaced: set[int] = set()
-            for region, block in done:
-                replaced.update(range(region.start, region.end))
-                blocks.append(block)
-            lines = [line for i, line in enumerate(lines) if i not in replaced]
+            flow = _place_formulas(flow, lines, done)
+        n_inline = 0
+        if opts.inline_math:
+            lines = [x for x in flow if isinstance(x, TextLine) and not x.rotated]
+            rewritten, n_inline = apply_inline_math(lines, text_chars)
+            if n_inline:
+                flow = _replace_lines(flow, lines, rewritten)
 
-        if blocks:
-            return _PageRecord(page_no, "structured", lines=lines, blocks=blocks)
-        text = page.extract_text()
-        return _PageRecord(page_no, "plain", text=(text or "").strip(), lines=lines)
+        structured = bool(n_inline) or any(
+            isinstance(x, Block) and x.markdown.strip() for x in flow
+        )
+        text = ""
+        if not structured and opts.legacy_text:
+            text = (page.extract_text() or "").strip()
+        return _PageRecord(
+            page_no,
+            "structured" if structured else "plain",
+            text=text,
+            flow=flow,
+            height=float(page.height),
+        )
+
+    @staticmethod
+    def _with_image_boxes(page: Any, blocks: List[Block]) -> List[Block]:
+        """Blocks for the reading-order analysis.
+
+        Described images get their full box, and images without a
+        description are added as empty blocks: a figure between two groups
+        of columns must separate them even when nothing is rendered for it.
+        """
+        try:
+            boxes = page_images(page)
+        except Exception as exc:
+            logger.debug("Could not list page images: %s", exc, exc_info=True)
+            return blocks
+        out = list(blocks)
+        for x0, top, x1, bottom in boxes:
+            match = next(
+                (
+                    b
+                    for b in blocks
+                    if b.x1 is None and abs(b.x0 - x0) < 0.5 and abs(b.top - top) < 0.5
+                ),
+                None,
+            )
+            if match is not None:
+                match.x1, match.bottom = x1, bottom
+            else:
+                out.append(Block(top=top, x0=x0, markdown="", x1=x1, bottom=bottom))
+        return out
 
     def _describe_images(
         self, page: Any, page_no: int, opts: _Options, state: _State

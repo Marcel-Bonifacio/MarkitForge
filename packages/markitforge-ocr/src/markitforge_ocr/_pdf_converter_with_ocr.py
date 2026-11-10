@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) Microsoft Corporation (MarkItDown)
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+#
+# SPDX-License-Identifier: MIT AND Apache-2.0
+# Derived from MarkItDown (MIT). MarkitForge changes are Apache-2.0; see NOTICE.
+
 """
 Enhanced PDF Converter with OCR support for embedded images.
 Extracts images from PDFs and performs OCR while maintaining document context.
@@ -12,7 +18,7 @@ from markitforge._exceptions import (
     MissingDependencyException,
     MISSING_DEPENDENCY_MESSAGE,
 )
-from ._ocr_service import LLMVisionOCRService
+from ._ocr_service import LLMVisionOCRService, OCRCache
 
 # Import dependencies
 _dependency_exc_info = None
@@ -175,6 +181,10 @@ class PdfConverterWithOCR(DocumentConverter):
             kwargs.get("ocr_service") or self.ocr_service
         )
 
+        # An image repeated in the document (a logo on every page, say) is
+        # recognized once per conversion.
+        ocr_cache = OCRCache()
+
         # Read PDF into BytesIO
         file_stream.seek(0)
         pdf_bytes = io.BytesIO(file_stream.read())
@@ -234,8 +244,8 @@ class PdfConverterWithOCR(DocumentConverter):
                             # OCR all images
                             image_data = []
                             for img_info in images_on_page:
-                                ocr_result = ocr_service.extract_text(
-                                    img_info["stream"]
+                                ocr_result = ocr_cache.extract_text(
+                                    ocr_service, img_info["stream"]
                                 )
                                 if ocr_result.text.strip():
                                     image_data.append(
@@ -304,7 +314,7 @@ class PdfConverterWithOCR(DocumentConverter):
         # treat as scanned PDF and OCR full pages
         if ocr_service and (not markdown or not markdown.strip()):
             pdf_bytes.seek(0)
-            markdown = self._ocr_full_pages(pdf_bytes, ocr_service)
+            markdown = self._ocr_full_pages(pdf_bytes, ocr_service, ocr_cache)
 
         return DocumentConverterResult(markdown=markdown)
 
@@ -336,7 +346,10 @@ class PdfConverterWithOCR(DocumentConverter):
         return images
 
     def _ocr_full_pages(
-        self, pdf_bytes: io.BytesIO, ocr_service: LLMVisionOCRService
+        self,
+        pdf_bytes: io.BytesIO,
+        ocr_service: LLMVisionOCRService,
+        ocr_cache: Optional[OCRCache] = None,
     ) -> str:
         """
         Fallback for scanned PDFs: Convert entire pages to images and OCR them.
@@ -345,11 +358,15 @@ class PdfConverterWithOCR(DocumentConverter):
         Args:
             pdf_bytes: PDF file as BytesIO
             ocr_service: OCR service to use
+            ocr_cache: Results already obtained in this conversion; pages that
+                render to identical images are recognized once
 
         Returns:
             Markdown text extracted from OCR of full pages
         """
         markdown_parts = []
+        if ocr_cache is None:
+            ocr_cache = OCRCache()
 
         try:
             pdf_bytes.seek(0)
@@ -365,7 +382,7 @@ class PdfConverterWithOCR(DocumentConverter):
                         img_stream.seek(0)
 
                         # Run OCR
-                        ocr_result = ocr_service.extract_text(img_stream)
+                        ocr_result = ocr_cache.extract_text(ocr_service, img_stream)
 
                         if ocr_result.text.strip():
                             text = ocr_result.text.strip()
@@ -398,7 +415,7 @@ class PdfConverterWithOCR(DocumentConverter):
                         img_stream = io.BytesIO(pix.tobytes("png"))
                         img_stream.seek(0)
 
-                        ocr_result = ocr_service.extract_text(img_stream)
+                        ocr_result = ocr_cache.extract_text(ocr_service, img_stream)
 
                         if ocr_result.text.strip():
                             text = ocr_result.text.strip()

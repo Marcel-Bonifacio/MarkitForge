@@ -21,12 +21,27 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Hashable, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Hashable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from ..._base_converter import DocumentAsset
 from ..._stream_info import StreamInfo
 from .._text_safety import safe_alt_text, safe_latex
 from ._layout import Block, TextLine
+from ._math import (  # noqa: F401  (re-exported for the converter)
+    apply_inline_math,
+    display_math_flags,
+    inline_math_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -398,18 +413,30 @@ def _is_math_line(line: TextLine) -> bool:
     return line.math_chars >= MATH_LINE_MIN_CHARS and line.math_ratio >= MATH_LINE_RATIO
 
 
-def find_math_regions(lines: Sequence[TextLine]) -> List[MathRegion]:
-    """Group adjacent formula lines (by math font) into display regions."""
+def find_math_regions(
+    lines: Sequence[TextLine],
+    chars: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> List[MathRegion]:
+    """Group adjacent formula lines into display regions.
+
+    A line is a formula line when it is set in a math font, or when its
+    text is dense with math: Unicode operators, Greek letters and
+    super/subscripts. With the page's ``chars``, baseline-shifted scripts
+    and Symbol-font letters count too, and script fragments that line
+    extraction split off a formula join its region.
+    """
+    shown = display_math_flags(lines, chars)
+    flags = [_is_math_line(line) or shown[k] for k, line in enumerate(lines)]
     regions: List[MathRegion] = []
     i = 0
     while i < len(lines):
-        if not _is_math_line(lines[i]):
+        if not flags[i]:
             i += 1
             continue
         j = i + 1
         while (
             j < len(lines)
-            and _is_math_line(lines[j])
+            and flags[j]
             and lines[j].top - lines[j - 1].bottom < 1.5 * lines[j - 1].height
         ):
             j += 1

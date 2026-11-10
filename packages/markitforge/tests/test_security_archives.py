@@ -28,6 +28,7 @@ from markitforge.converter_utils._archive_limits import (
     ArchiveLimits,
     CaptionCache,
     data_uri_length,
+    image_signature,
     read_member,
 )
 from markitforge.converter_utils.docx import page_breaks
@@ -164,6 +165,135 @@ def test_caption_cache_dedupes_and_caps() -> None:
     assert cache.caption(b"d", make(b"d")) is None
     assert produced == [b"a", b"b"]
     assert len(cache.warnings) == 1 and "max_llm_calls" in cache.warnings[0]
+
+
+def _photo(seed: int, size: Tuple[int, int] = (240, 180)) -> Any:
+    """A smooth, detailed picture (random 12x9 colours, scaled up)."""
+    from PIL import Image
+
+    rnd = random.Random(seed)
+    small = Image.new("RGB", (12, 9))
+    small.putdata(
+        [
+            (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
+            for _ in range(12 * 9)
+        ]
+    )
+    return small.resize(size, Image.Resampling.BICUBIC)
+
+
+def _encoded(image: Any, fmt: str = "PNG", **options: Any) -> bytes:
+    out = io.BytesIO()
+    image.save(out, format=fmt, **options)
+    return out.getvalue()
+
+
+def _counting(cache: CaptionCache, produced: List[bytes]) -> Callable[[bytes], Any]:
+    def caption(data: bytes) -> Any:
+        def produce() -> str:
+            produced.append(data)
+            return f"caption {len(produced)}"
+
+        return cache.caption(data, produce)
+
+    return caption
+
+
+def test_caption_cache_reuses_captions_of_recompressed_and_resized_copies() -> None:
+    picture = _photo(1)
+    original = _encoded(picture)
+    copies = [
+        _encoded(picture, "JPEG", quality=60),
+        _encoded(picture.resize((120, 90))),
+        _encoded(picture.resize((480, 360)), "JPEG", quality=85),
+    ]
+    stretched = _encoded(picture.resize((240, 200)))  # same picture, other shape
+    other = _encoded(_photo(2))
+
+    produced: List[bytes] = []
+    caption = _counting(CaptionCache(10), produced)
+    assert caption(original) == "caption 1"
+    assert [caption(copy) for copy in copies] == ["caption 1"] * 3
+    assert caption(other) == "caption 2"
+    assert caption(stretched) == "caption 3"
+    assert caption(copies[0]) == "caption 1"  # now known by its bytes too
+    assert produced == [original, other, stretched]
+
+    exact: List[bytes] = []
+    caption = _counting(CaptionCache(10, similar=False), exact)
+    for data in [original] + copies + [original]:
+        caption(data)
+    assert exact == [original] + copies
+
+
+def test_caption_cache_does_not_merge_pictures_without_detail() -> None:
+    from PIL import Image, ImageDraw
+
+    white = Image.new("RGB", (200, 150), "white")
+    grey = Image.new("RGB", (200, 150), "#cccccc")
+    dot = white.copy()
+    ImageDraw.Draw(dot).ellipse([(96, 71), (104, 79)], fill="black")
+    rising = white.copy()
+    ImageDraw.Draw(rising).line([(10, 140), (190, 20)], fill="black", width=3)
+    falling = white.copy()
+    ImageDraw.Draw(falling).line([(10, 20), (190, 140)], fill="black", width=3)
+
+    flat = [_encoded(white), _encoded(grey), _encoded(dot)]
+    assert [image_signature(data) for data in flat] == [None, None, None]
+    assert image_signature(b"not an image") is None
+    assert image_signature(_encoded(_photo(3))) is not None
+
+    produced: List[bytes] = []
+    caption = _counting(CaptionCache(10), produced)
+    pictures = flat + [_encoded(rising), _encoded(falling)]
+    assert [caption(data) for data in pictures] == [
+        f"caption {number}" for number in range(1, 6)
+    ]
+
+
+def test_similar_images_do_not_get_around_the_call_cap() -> None:
+    picture = _photo(4)
+    produced: List[bytes] = []
+    cache = CaptionCache(1)
+    caption = _counting(cache, produced)
+    assert caption(_encoded(picture)) == "caption 1"
+    assert caption(_encoded(picture, "JPEG", quality=70)) == "caption 1"
+    assert caption(_encoded(_photo(5))) is None
+    assert caption(_encoded(_photo(5), "JPEG", quality=70)) is None
+    assert caption(_encoded(picture.resize((120, 90)))) == "caption 1"
+    assert len(produced) == 1 and cache.calls == 1 and cache.calls_left == 0
+    assert len(cache.warnings) == 1 and "max_llm_calls" in cache.warnings[0]
+
+
+def test_docx_similar_images_are_captioned_once(tmp_path: Path) -> None:
+    picture = _photo(6)
+    images = [
+        _encoded(picture),
+        _encoded(picture.resize((120, 90))),
+        _encoded(_photo(7)),
+        _encoded(picture.resize((360, 270))),
+    ]
+    data = _docx_with_images(tmp_path, images)
+
+    def convert(**options: Any) -> Tuple[int, Any]:
+        client = _FakeLLM("a caption")
+        result = DocxConverter().convert(
+            io.BytesIO(data),
+            StreamInfo(extension=".docx"),
+            describe_images=True,
+            llm_client=client,
+            llm_model="m",
+            **options,
+        )
+        return client.calls, result
+
+    calls, result = convert()
+    assert calls == 2
+    assert result.markdown.count("![a caption]") == 4 and result.warnings == []
+    assert convert(dedupe_similar_images=False)[0] == 4
+    # Copies of a captioned picture stay captioned after the cap is reached.
+    calls, result = convert(max_llm_calls=1)
+    assert calls == 1 and result.markdown.count("![a caption]") == 3
 
 
 # ------------------------------------------------------------------ ZIP bombs
@@ -601,3 +731,113 @@ def test_byte_budget_is_shared_with_documents_inside_a_zip() -> None:
     assert len(limited.warnings) == 1
     assert "doc.docx" in limited.warnings[0]
     assert "max_archive_bytes" in limited.warnings[0]
+
+
+# ------------------------------------------- documents nested in an archive
+
+
+def _stored(package: bytes) -> bytes:
+    """The same package with every member stored uncompressed."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(package)) as source:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as target:
+            for info in source.infolist():
+                target.writestr(info.filename, source.read(info))
+    return out.getvalue()
+
+
+def _uncompressed(package: bytes) -> int:
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        return sum(info.file_size for info in archive.infolist())
+
+
+def test_budget_prepaid_bytes_are_charged_once() -> None:
+    budget = ArchiveBudget(ArchiveLimits(max_archive_bytes=1000))
+    budget.charge_bytes(400)  # the member itself
+    with budget.prepaid(400):
+        budget.charge_bytes(300)  # its parts, up to its own size: free
+        assert budget.bytes_used == 400
+        with budget.prepaid(50):  # a member of the member
+            budget.charge_bytes(80)
+        assert budget.bytes_used == 430
+        budget.charge_bytes(250)  # 100 of the allowance are left
+        assert budget.bytes_used == 580
+    budget.charge_bytes(100)  # nothing carries over
+    assert budget.bytes_used == 680
+    with budget.prepaid(10_000), pytest.raises(ResourceLimitException):
+        budget.charge_bytes(10_000 + 321)
+    assert budget.exhausted is not None
+
+
+@pytest.mark.parametrize(
+    "fixture,extension",
+    [("test.docx", ".docx"), ("test.xlsx", ".xlsx"), ("test.pptx", ".pptx")],
+)
+def test_zip_of_office_files_is_not_charged_twice(fixture: str, extension: str) -> None:
+    # Five documents whose parts add up to about the size of the document
+    # itself (stored, like media-heavy files). Scaled-down picture of five
+    # 40 MB documents under a 300 MB limit: they fit once, not twice.
+    document = _stored((TEST_FILES_DIR / fixture).read_bytes())
+    parts = _uncompressed(document)
+    assert parts <= len(document) < 1.2 * parts
+    members = [(f"d{i}{extension}", document) for i in range(5)]
+    archive = _zip(members, level=1)
+    limit = int(1.5 * 5 * len(document))
+    assert 5 * (len(document) + parts) > limit  # what used to be charged
+
+    result = _convert(archive, ".zip", max_archive_bytes=limit)
+    assert result.markdown.count("## File: d") == 5
+    assert not any("max_archive" in w for w in result.warnings)
+
+    # The members themselves still count in full.
+    tight = _convert(archive, ".zip", max_archive_bytes=4 * len(document))
+    assert tight.markdown.count("## File: d") == 4
+    assert sum("max_archive_bytes" in w for w in tight.warnings) == 1
+
+
+def test_zip_inside_zip_is_not_charged_twice() -> None:
+    blobs = [(f"{i}.txt", os.urandom(100_000).hex().encode()) for i in range(5)]
+    inner = _zip(blobs, level=0)
+    archive = _zip([("inner.zip", inner), ("tail.txt", b"tail")], level=0)
+    limit = int(1.5 * len(inner))
+    result = _convert(archive, ".zip", max_archive_bytes=limit)
+    assert result.markdown.count("## File: ") == 7 and result.warnings == []
+
+
+def test_document_bomb_inside_a_zip_is_still_charged() -> None:
+    # The DOCX is small as a ZIP member but holds 3 MiB; only its own size
+    # was paid for, so the rest must be charged and trips the limit.
+    bomb = _add_zero_member(
+        (TEST_FILES_DIR / "test.docx").read_bytes(), "word/media/pad.bin", 3 * MIB
+    )
+    assert len(bomb) < MIB // 4
+    archive = _zip([("bomb.docx", bomb), ("z.txt", b"tail")], level=0)
+    result = _convert(
+        archive, ".zip", max_archive_bytes=MIB, max_compression_ratio=1_000_000
+    )
+    assert "## File: bomb.docx" not in result.markdown
+    assert "## File: z.txt" not in result.markdown  # the budget is spent
+    assert len(result.warnings) == 1
+    assert "bomb.docx" in result.warnings[0]
+    assert "max_archive_bytes" in result.warnings[0]
+
+    # With the ratio check on, the member is refused on its own.
+    refused = _convert(archive, ".zip", max_archive_bytes=MIB)
+    assert any(
+        "bomb.docx" in w and "max_compression_ratio" in w for w in refused.warnings
+    )
+    assert "## File: z.txt" in refused.markdown
+
+
+def test_document_bomb_nested_two_levels_deep_is_still_charged() -> None:
+    bomb = _add_zero_member(
+        (TEST_FILES_DIR / "test.xlsx").read_bytes(), "xl/media/pad.bin", 3 * MIB
+    )
+    inner = _zip([("bomb.xlsx", bomb)], level=0)
+    archive = _zip([("inner.zip", inner), ("z.txt", b"tail")], level=0)
+    result = _convert(
+        archive, ".zip", max_archive_bytes=MIB, max_compression_ratio=1_000_000
+    )
+    assert "## File: bomb.xlsx" not in result.markdown
+    assert "## File: z.txt" not in result.markdown
+    assert any("max_archive_bytes" in w for w in result.warnings)

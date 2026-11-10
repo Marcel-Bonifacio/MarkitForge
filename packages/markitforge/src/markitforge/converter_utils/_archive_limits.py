@@ -8,7 +8,9 @@ Every limit is an optional keyword argument of ``MarkitForge.convert()``;
 ``None`` (or leaving it out) keeps the default:
 
 * ``max_archive_bytes`` -- total uncompressed bytes per document, shared by
-  every archive nested inside it (default 500 MiB).
+  every archive nested inside it (default 500 MiB). A document found inside a
+  ZIP is counted once: its parts are charged only as far as they exceed the
+  bytes already charged for the document as a ZIP member.
 * ``max_archive_member_bytes`` -- uncompressed bytes of a single member
   (default 200 MiB).
 * ``max_archive_entries`` -- members per document, shared by every nested
@@ -20,7 +22,9 @@ Every limit is an optional keyword argument of ``MarkitForge.convert()``;
 * ``max_inline_bytes`` -- characters of ``data:`` URIs a document may inline
   when ``keep_data_uris`` is set (default 50 MiB).
 * ``max_llm_calls`` -- LLM image-caption calls per document, after identical
-  images have been deduplicated (default 50).
+  images have been deduplicated (default 50). With ``dedupe_similar_images``
+  (a boolean, default ``True``) re-compressed or resized copies of a picture
+  share one caption as well; see :class:`CaptionCache`.
 
 Sizes declared in the ZIP central directory are checked before a member is
 read, and bytes are counted again while streaming, so a member that inflates
@@ -29,9 +33,23 @@ past its declared size or past the cap is cut off. A limit hit raises
 """
 
 import hashlib
+import io
+import warnings
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import IO, Any, Callable, Dict, List, Mapping, NoReturn, Optional
+from typing import (
+    IO,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Mapping,
+    NoReturn,
+    Optional,
+    Tuple,
+)
 
 from .._exceptions import FileConversionException, ResourceLimitException
 
@@ -104,6 +122,8 @@ class ArchiveBudget:
         self.depth_refusals = 0
         #: Message of the document-wide limit that was hit, if any.
         self.exhausted: Optional[str] = None
+        #: Bytes of the member being converted that are already charged.
+        self._prepaid = 0
 
     def _exhaust(self, message: str) -> NoReturn:
         if self.exhausted is None:
@@ -124,8 +144,28 @@ class ArchiveBudget:
                 "entries in total (max_archive_entries)."
             )
 
+    @contextmanager
+    def prepaid(self, count: int) -> Iterator[None]:
+        """Convert an archive member whose ``count`` bytes are already charged.
+
+        If the member turns out to be an archive itself (a DOCX inside a
+        ZIP, say), the bytes of its own members are the same content again.
+        While the block runs, the first ``count`` bytes charged are therefore
+        free; everything the member expands to beyond its own size is charged
+        as usual. The allowance ends with the block.
+        """
+        outer = self._prepaid
+        self._prepaid = count
+        try:
+            yield
+        finally:
+            self._prepaid = outer
+
     def charge_bytes(self, count: int) -> None:
         self.ensure_open()
+        covered = min(self._prepaid, count)
+        self._prepaid -= covered
+        count -= covered
         self.bytes_used += count
         if self.bytes_used > self.limits.max_archive_bytes:
             self._exhaust(
@@ -311,20 +351,89 @@ class InlineBudget:
         return False
 
 
+#: Images with more pixels than this are not decoded for a perceptual hash.
+_MAX_HASH_PIXELS = 64_000_000
+#: Largest Hamming distance between the hashes of two copies of one picture.
+SIMILAR_HASH_DISTANCE = 4
+#: Largest relative difference between their aspect ratios.
+SIMILAR_ASPECT_TOLERANCE = 0.02
+# A hash with very few (or nearly all) bits set comes from a picture that is
+# almost uniform at hash resolution, such as a thin line drawing on a white
+# page; different pictures of that kind hash alike, so they are not compared.
+_MIN_HASH_BITS = 10
+
+
+def image_signature(data: bytes) -> Optional[Tuple[int, float]]:
+    """(64-bit difference hash, width/height) of an image, or ``None``.
+
+    The image is reduced to 9x8 grey pixels; each bit says whether a pixel is
+    brighter than its right-hand neighbour. Re-compressed or resized copies
+    of a picture get hashes a few bits apart. ``None`` means the image cannot
+    be compared this way: Pillow is missing or cannot read it, it is too
+    large to decode, or it has too little detail for the hash to tell
+    pictures apart.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                width, height = image.size
+                if width < 1 or height < 1 or width * height > _MAX_HASH_PIXELS:
+                    return None
+                image.draft("L", (72, 64))  # cheap downscale where supported
+                pixels = (
+                    image.convert("L")
+                    .resize((9, 8), Image.Resampling.LANCZOS)
+                    .tobytes()
+                )
+    except Exception:
+        return None
+    bits = 0
+    for row in range(8):
+        for column in range(8):
+            offset = row * 9 + column
+            bits = (bits << 1) | (pixels[offset] > pixels[offset + 1])
+    if not _MIN_HASH_BITS <= bin(bits).count("1") <= 64 - _MIN_HASH_BITS:
+        return None
+    return bits, width / height
+
+
+def signatures_match(first: Tuple[int, float], second: Tuple[int, float]) -> bool:
+    """Whether two :func:`image_signature` results show the same picture."""
+    if bin(first[0] ^ second[0]).count("1") > SIMILAR_HASH_DISTANCE:
+        return False
+    return abs(first[1] - second[1]) <= SIMILAR_ASPECT_TOLERANCE * max(
+        first[1], second[1]
+    )
+
+
 class CaptionCache:
     """Per-document LLM captions: one call per distinct image, at most ``max_calls``.
 
-    Images are identified by the SHA-256 of their bytes. A caption that
-    failed is remembered as ``None`` so the same image is not retried. Once
-    the call budget is spent, uncaptioned images get ``None`` and a single
-    warning is added.
+    Images are identified by the SHA-256 of their bytes. With ``similar``
+    (the ``dedupe_similar_images`` option, on by default) an image that is
+    not byte-identical to an earlier one still reuses its caption when their
+    difference hashes are at most 4 bits apart and their aspect ratios
+    within 2% (see :func:`image_signature`); images Pillow cannot read are
+    matched by their bytes only. A reused caption costs no call.
+
+    A caption that failed is remembered as ``None`` so the same image is not
+    retried. Once the call budget is spent, uncaptioned images get ``None``
+    and a single warning is added.
     """
 
-    def __init__(self, max_calls: float) -> None:
+    def __init__(self, max_calls: float, *, similar: bool = True) -> None:
         self.calls_left = max_calls
         self.calls = 0
         self.warnings: List[str] = []
         self._captions: Dict[str, Optional[str]] = {}
+        self._similar = similar
+        #: (signature, SHA-256 key) of every image a call was made for.
+        self._signatures: List[Tuple[Tuple[int, float], str]] = []
 
     def caption(
         self, data: bytes, produce: Callable[[], Optional[str]]
@@ -332,6 +441,12 @@ class CaptionCache:
         key = hashlib.sha256(data).hexdigest()
         if key in self._captions:
             return self._captions[key]
+        signature = image_signature(data) if self._similar else None
+        if signature is not None:
+            for known, known_key in self._signatures:
+                if signatures_match(signature, known):
+                    self._captions[key] = self._captions[known_key]
+                    return self._captions[key]
         if self.calls_left <= 0:
             if not self.warnings:
                 self.warnings.append(
@@ -342,6 +457,8 @@ class CaptionCache:
         self.calls_left -= 1
         self.calls += 1
         self._captions[key] = None
+        if signature is not None:
+            self._signatures.append((signature, key))
         result = produce()
         self._captions[key] = result
         return result
