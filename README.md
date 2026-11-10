@@ -1,99 +1,161 @@
-# MarkItDown
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/markitforge-logo-dark.svg">
+    <img alt="MarkitForge" src="assets/brand/markitforge-logo-light.svg" width="440">
+  </picture>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/markitdown.svg)](https://pypi.org/project/markitdown/)
-![PyPI - Downloads](https://img.shields.io/pypi/dd/markitdown)
+# MarkitForge
+
+Turn PDFs, Word, PowerPoint, Excel, web pages and more into clean, structured Markdown — from Python, the command line, an MCP server, or a **desktop-style app that needs no terminal**.
+
+MarkitForge is a fork of [microsoft/markitdown](https://github.com/microsoft/markitdown) (MIT). It keeps MarkItDown's API (`from markitforge import MarkItDown` still works, and plugins written for `markitdown.plugin` still load) and fixes the problems people hit most often.
 
 > [!IMPORTANT]
-> MarkItDown performs I/O with the privileges of the current process. Like open() or requests.get(), it will access resources that the process itself can access. Sanitize your inputs in untrusted environments, and call the narrowest `convert_*` function needed for your use case (e.g., `convert_stream()`, or `convert_local()`). See the [Security Considerations](#security-considerations) section of the documentation for more information.
+> MarkitForge performs I/O with the privileges of the current process. Like open() or requests.get(), it will access resources that the process itself can access. Sanitize your inputs in untrusted environments, and call the narrowest `convert_*` function needed for your use case (e.g., `convert_stream()`, or `convert_local()`). See the [Security Considerations](#security-considerations) section of the documentation for more information.
 
-MarkItDown is a lightweight Python utility for converting various files to Markdown for use with LLMs and related text analysis pipelines. To this end, it is most comparable to [textract](https://github.com/deanmalmgren/textract), but with a focus on preserving important document structure and content as Markdown (including: headings, lists, tables, links, etc.) While the output is often reasonably presentable and human-friendly, it is meant to be consumed by text analysis tools -- and may not be the best option for high-fidelity document conversions for human consumption.
+## What MarkitForge adds
 
-MarkItDown currently supports the conversion from:
+| Area | What changed |
+|---|---|
+| **PDF** | Tables found on every page (not only form-like pages), headings from font size, per-page sections, document metadata, warnings for scanned pages, optional [Docling](https://github.com/docling-project/docling) backend, LLM image descriptions and formula-to-LaTeX. |
+| **Pages** | `--page-markers` puts `<!-- page N -->` between pages / slides / sheets. `--pages 1-3,7` outputs only those pages. |
+| **Excel** | Blank cells stay blank (no more `NaN`), whole numbers stay whole, hidden sheets skipped unless `--include-hidden-sheets`. |
+| **Word** | Page markers, document properties, optional headers/footers, LLM image descriptions. |
+| **Tables** | `--table-format auto` writes HTML tables only where cells are merged, so nothing is lost. |
+| **New formats** | `.doc`, `.rtf`, `.odt`, `.odp`, `.ods`, `.ppt`, `.wpd` (via LibreOffice), `.mht/.mhtml` (also OneNote and Word web exports), `.tsv`. |
+| **Structured results** | Every result carries `metadata`, `pages`, `assets` and `warnings`; `--json` prints them. |
+| **Batch** | `markitforge docs/ -r --glob "*.pdf" -o out/ -j 4` converts whole folders in parallel. |
+| **Safety** | URL fetches have a timeout and a size limit. The MCP server refuses `file:` URIs over HTTP unless you allow a folder. |
+| **MCP** | New tools: `convert_to_file` (keeps big docs out of the chat), `get_document_info`, `list_supported_formats`; `pages` and `max_chars` on `convert_to_markdown`. |
+| **Lighter install** | Magika (file-type sniffing) is optional. |
+| **Quality** | A [benchmark](benchmarks/) scores tables, headings, reading order and junk on fixed documents and runs in CI. |
 
-- PDF
-- PowerPoint
-- Word
-- Excel
-- Images (EXIF metadata and captioning)
-- Audio (EXIF metadata and speech transcription)
-- HTML
-- Text-based formats (CSV, JSON, XML)
-- ZIP files (iterates over contents)
-- YouTube URLs
-- EPubs
-- ... and more!
+## Desktop app (no terminal needed)
 
-NOTE: Image captioning and speech transcription rely on web-hosted services.
+The `markitforge-gui` package is a local app that runs in your browser. Drop files in, see the rendered Markdown next to the raw `.md`, then download or copy it. Nothing leaves your computer.
+
+**Easiest start:** open `packages/markitforge-gui/launchers/` and double-click **`MarkitForge.command`** (macOS) or **`MarkitForge.bat`** (Windows). The first run installs everything into a private folder (a few minutes); later runs start in seconds. You need Python 3.10+ installed ([python.org](https://www.python.org/downloads/)).
+
+From a terminal:
+
+```bash
+git clone https://github.com/Marcel-Bonifacio/MarkitForge.git
+cd MarkitForge
+pip install -e 'packages/markitforge[all]' -e packages/markitforge-gui
+markitforge-gui
+```
+
+See [`packages/markitforge-gui/README.md`](packages/markitforge-gui/README.md) for options.
+
+## Quality benchmark
+
+`python benchmarks/run_benchmark.py` builds tricky documents from code and scores the output (1.00 = perfect). Same documents, upstream MarkItDown vs MarkitForge:
+
+| Document | What it tests | MarkItDown 0.1.x | MarkitForge |
+|---|---|---|---|
+| PDF report | headings, ruled table, page break | 0.60 | **1.00** |
+| Two-column PDF | heading next to a column, reading order | 0.75 | **1.00** |
+| Word, merged cells | headings, table cells | 1.00 | 1.00 |
+| Excel, blanks + hidden sheet | no `NaN`, no hidden data, whole numbers | 0.64 | **1.00** |
+
+Full details: [`benchmarks/README.md`](benchmarks/README.md).
+
+## Supported formats
+
+See [docs/FORMATS.md](docs/FORMATS.md), or run `markitforge --list-formats` to see what works on your machine.
+
+NOTE: Image captioning, image descriptions, formula transcription and speech transcription rely on web-hosted services.
 
 ## Why Markdown?
 
 Markdown is extremely close to plain text, with minimal markup or formatting, but still
-provides a way to represent important document structure. Mainstream LLMs, such as
-OpenAI's GPT-4o, natively "_speak_" Markdown, and often incorporate Markdown into their
-responses unprompted. This suggests that they have been trained on vast amounts of
-Markdown-formatted text, and understand it well. As a side benefit, Markdown conventions
-are also highly token-efficient.
+provides a way to represent important document structure. Mainstream LLMs natively "_speak_" Markdown, and often incorporate Markdown into their
+responses unprompted. As a side benefit, Markdown conventions are also highly token-efficient.
 
 ## Prerequisites
-MarkItDown requires Python 3.10 through 3.14. It is recommended to use a virtual environment to avoid dependency conflicts.
-
-With the standard Python installation, you can create and activate a virtual environment using the following commands:
+MarkitForge requires Python 3.10 through 3.14. It is recommended to use a virtual environment to avoid dependency conflicts.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-If using `uv`, you can create a virtual environment with:
+With `uv`:
 
 ```bash
 uv venv --python=3.12 .venv
 source .venv/bin/activate
-# NOTE: Be sure to use 'uv pip install' rather than just 'pip install' to install packages in this virtual environment
-```
-
-If you are using Anaconda, you can create a virtual environment with:
-
-```bash
-conda create -n markitdown python=3.12
-conda activate markitdown
+# NOTE: use 'uv pip install' rather than just 'pip install' in this environment
 ```
 
 ## Installation
 
-To install MarkItDown, use pip: `pip install 'markitdown[all]'`. Alternatively, you can install it from the source:
+> [!WARNING]
+> MarkitForge is **not on PyPI yet**. Do not run `pip install markitforge` (or `markitforge-gui`, `-mcp`, `-ocr`): those names are unclaimed, so anyone could publish a package under them. Install from source, and install the sub-packages together with the core from the same checkout so pip never looks the core up on PyPI.
 
 ```bash
-git clone git@github.com:microsoft/markitdown.git
-cd markitdown
-pip install -e 'packages/markitdown[all]'
+git clone https://github.com/Marcel-Bonifacio/MarkitForge.git
+cd MarkitForge
+pip install -e 'packages/markitforge[all]'
 ```
+
+To convert `.doc`, `.rtf` and OpenDocument files, also install [LibreOffice](https://www.libreoffice.org/download/).
 
 ## Usage
 
 ### Command-Line
 
 ```bash
-markitdown path-to-file.pdf > document.md
+markitforge path-to-file.pdf > document.md
 ```
 
 Or use `-o` to specify the output file:
 
 ```bash
-markitdown path-to-file.pdf -o document.md
+markitforge path-to-file.pdf -o document.md
 ```
 
 You can also pipe content:
 
 ```bash
-cat path-to-file.pdf | markitdown
+cat path-to-file.pdf | markitforge
 ```
 
-### Optional Dependencies
-MarkItDown has optional dependencies for activating various file formats. Earlier in this document, we installed all optional dependencies with the `[all]` option. However, you can also install them individually for more control. For example:
+#### MarkitForge options
 
 ```bash
-pip install 'markitdown[pdf, docx, pptx]'
+# Page markers, and only some pages
+markitforge report.pdf --page-markers
+markitforge slides.pptx --pages 2-4
+
+# Everything as JSON (markdown + metadata + pages + warnings)
+markitforge report.pdf --json > report.json
+
+# Merged-cell tables as HTML, plain tables as Markdown
+markitforge plan.docx --table-format auto
+
+# Whole folder, sub-folders too, 4 at a time
+markitforge ./inbox -r --glob "*.pdf" -o ./markdown -j 4
+
+# Hard layouts: use Docling (pip install docling)
+markitforge paper.pdf --pdf-backend docling
+
+# Describe images and turn PDF math into LaTeX with an LLM
+export OPENAI_API_KEY=...
+markitforge paper.pdf --describe-images --transcribe-formulas --llm-model gpt-4o
+
+# What can this machine convert?
+markitforge --list-formats
+```
+
+Other flags: `--include-hidden-sheets`, `--include-headers-footers`, `--no-magika`, `--fetch-timeout SECONDS`, `--max-download-mb MB`, `--overwrite`. Run `markitforge --help` for all.
+
+### Optional Dependencies
+MarkitForge has optional dependencies for activating various file formats. Earlier in this document, we installed all optional dependencies with the `[all]` option. However, you can also install them individually for more control. For example:
+
+```bash
+pip install -e 'packages/markitforge[pdf, docx, pptx]'
 ```
 
 will install only the dependencies for PDF, DOCX, and PPTX files.
@@ -114,28 +176,28 @@ At the moment, the following optional dependencies are available:
 
 ### Plugins
 
-MarkItDown also supports 3rd-party plugins. Plugins are disabled by default. To list installed plugins:
+MarkitForge also supports 3rd-party plugins. Plugins are disabled by default. To list installed plugins:
 
 ```bash
-markitdown --list-plugins
+markitforge --list-plugins
 ```
 
 To enable plugins use:
 
 ```bash
-markitdown --use-plugins path-to-file.pdf
+markitforge --use-plugins path-to-file.pdf
 ```
 
-To find available plugins, search GitHub for the hashtag `#markitdown-plugin`. To develop a plugin, see `packages/markitdown-sample-plugin`.
+To find available plugins, search GitHub for the hashtag `#markitforge-plugin`. To develop a plugin, see `packages/markitforge-sample-plugin`.
 
-#### markitdown-ocr Plugin
+#### markitforge-ocr Plugin
 
-The `markitdown-ocr` plugin adds OCR support to PDF, DOCX, PPTX, and XLSX converters, extracting text from embedded images using LLM Vision — the same `llm_client` / `llm_model` pattern that MarkItDown already uses for image descriptions. No new ML libraries or binary dependencies required.
+The `markitforge-ocr` plugin adds OCR support to PDF, DOCX, PPTX, and XLSX converters, extracting text from embedded images using LLM Vision — the same `llm_client` / `llm_model` pattern that MarkitForge already uses for image descriptions. No new ML libraries or binary dependencies required.
 
 **Installation:**
 
 ```bash
-pip install markitdown-ocr
+pip install -e packages/markitforge-ocr  # from the repo checkout
 pip install openai  # or any OpenAI-compatible client
 ```
 
@@ -144,10 +206,10 @@ pip install openai  # or any OpenAI-compatible client
 Pass the same `llm_client` and `llm_model` you would use for image descriptions:
 
 ```python
-from markitdown import MarkItDown
+from markitforge import MarkitForge
 from openai import OpenAI
 
-md = MarkItDown(
+md = MarkitForge(
     enable_plugins=True,
     llm_client=OpenAI(),
     llm_model="gpt-4o",
@@ -158,13 +220,13 @@ print(result.markdown)
 
 If no `llm_client` is provided the plugin still loads, but OCR is silently skipped and the standard built-in converter is used instead.
 
-See [`packages/markitdown-ocr/README.md`](packages/markitdown-ocr/README.md) for detailed documentation.
+See [`packages/markitforge-ocr/README.md`](packages/markitforge-ocr/README.md) for detailed documentation.
 
 ### Azure Content Understanding
 
 [Azure Content Understanding](https://learn.microsoft.com/azure/ai-services/content-understanding/) provides higher-quality conversion with structured field extraction (YAML front matter), multi-modal support (documents, images, audio, video), and configurable analyzers.
 
-Install: `pip install 'markitdown[az-content-understanding]'`
+Install: `pip install -e 'packages/markitforge[az-content-understanding]'`
 
 #### When to use Content Understanding
 
@@ -186,23 +248,23 @@ Content Understanding is ideal when you need capabilities beyond what built-in o
 **CLI:**
 
 ```bash
-markitdown path-to-file.pdf --use-cu --cu-endpoint "<content_understanding_endpoint>"
+markitforge path-to-file.pdf --use-cu --cu-endpoint "<content_understanding_endpoint>"
 ```
 
 The endpoint can also be set once in the environment, so callers only need `--use-cu`:
 
 ```bash
-export MARKITDOWN_CU_ENDPOINT="<content_understanding_endpoint>"
-markitdown path-to-file.pdf --use-cu
+export MARKITFORGE_CU_ENDPOINT="<content_understanding_endpoint>"
+markitforge path-to-file.pdf --use-cu
 ```
 
 **Python API:**
 
 ```python
-from markitdown import MarkItDown
+from markitforge import MarkitForge
 
 # Zero-config — auto-selects analyzer per file type
-md = MarkItDown(cu_endpoint="<content_understanding_endpoint>")
+md = MarkitForge(cu_endpoint="<content_understanding_endpoint>")
 result = md.convert("report.pdf")   # documents → prebuilt-documentSearch
 result = md.convert("meeting.mp4")  # video → prebuilt-videoSearch
 result = md.convert("call.wav")     # audio → prebuilt-audioSearch
@@ -212,7 +274,7 @@ print(result.markdown)
 **With a custom analyzer** (for domain-specific field extraction):
 
 ```python
-md = MarkItDown(
+md = MarkitForge(
     cu_endpoint="<content_understanding_endpoint>",
     cu_analyzer_id="my-invoice-analyzer",
 )
@@ -234,9 +296,9 @@ When `cu_analyzer_id` is set, the converter automatically scopes it to compatibl
 **Cost note:** Each `convert()` call for a CU-routed format is a billable Azure API call. Use `cu_file_types` to restrict which formats route to CU:
 
 ```python
-from markitdown.converters import ContentUnderstandingFileType
+from markitforge.converters import ContentUnderstandingFileType
 
-md = MarkItDown(
+md = MarkitForge(
     cu_endpoint="<content_understanding_endpoint>",
     cu_file_types=[ContentUnderstandingFileType.PDF],  # only PDFs use CU
 )
@@ -250,22 +312,22 @@ To use Microsoft Document Intelligence for conversion:
 
 ```bash
 export AZURE_API_KEY="<document_intelligence_api_key>"
-markitdown path-to-file.pdf -o document.md -d -e "<document_intelligence_endpoint>"
+markitforge path-to-file.pdf -o document.md -d -e "<document_intelligence_endpoint>"
 ```
 
 The endpoint can also be set once in the environment, so callers only need `-d`:
 
 ```bash
-export MARKITDOWN_DOCINTEL_ENDPOINT="<document_intelligence_endpoint>"
-markitdown path-to-file.pdf -o document.md -d
+export MARKITFORGE_DOCINTEL_ENDPOINT="<document_intelligence_endpoint>"
+markitforge path-to-file.pdf -o document.md -d
 ```
 
-If `AZURE_API_KEY` is not set, MarkItDown uses `DefaultAzureCredential`.
+If `AZURE_API_KEY` is not set, MarkitForge uses `DefaultAzureCredential`.
 
 Select a model, configure analysis add-ons, or request fields from the CLI:
 
 ```bash
-markitdown document.pdf --use-docintel \
+markitforge document.pdf --use-docintel \
   --endpoint "<document_intelligence_endpoint>" \
   --docintel-model-id prebuilt-layout \
   --docintel-features "ocrHighResolution,styleFont" \
@@ -292,20 +354,35 @@ More information about how to set up an Azure Document Intelligence Resource can
 Basic usage in Python:
 
 ```python
-from markitdown import MarkItDown
+from markitforge import MarkitForge
 
-md = MarkItDown(enable_plugins=False) # Set to True to enable plugins
+md = MarkitForge(enable_plugins=False) # Set to True to enable plugins
 result = md.convert("test.xlsx")
 print(result.markdown)
+```
+
+Structured results and options:
+
+```python
+from markitforge import MarkitForge
+
+md = MarkitForge(fetch_timeout=(5, 30), max_download_bytes=50 * 1024**2)
+result = md.convert("report.pdf", page_markers=True, table_format="auto")
+
+result.metadata          # {"title": ..., "author": ..., "page_count": 12, ...}
+result.pages             # [DocumentSection(index=1, kind="page", markdown=...), ...]
+result.warnings          # ["Page 4 has no text layer; it may be a scan. ..."]
+result.select_pages("1-3")   # Markdown for pages 1 to 3 only
+result.to_dict()         # everything, JSON-ready
 ```
 
 Document Intelligence conversion in Python using an API key:
 
 ```python
 from azure.core.credentials import AzureKeyCredential
-from markitdown import MarkItDown
+from markitforge import MarkitForge
 
-md = MarkItDown(
+md = MarkitForge(
     docintel_endpoint="<document_intelligence_endpoint>",
     docintel_credential=AzureKeyCredential("<document_intelligence_api_key>"),
 )
@@ -320,9 +397,9 @@ Configure the model, analysis add-ons, and structured query fields:
 
 ```python
 from azure.ai.documentintelligence.models import DocumentAnalysisFeature
-from markitdown import MarkItDown
+from markitforge import MarkitForge
 
-md = MarkItDown(
+md = MarkitForge(
     docintel_endpoint="<document_intelligence_endpoint>",
     docintel_model_id="prebuilt-layout",
     docintel_features=[
@@ -336,7 +413,7 @@ print(result.markdown)
 ```
 
 Omit `docintel_features` or set `docintel_features=[]` to request no analysis
-add-ons. When query fields are provided, MarkItDown automatically enables the
+add-ons. When query fields are provided, MarkitForge automatically enables the
 required `queryFields` add-on.
 Models that return structured fields prepend them to the Markdown as YAML front
 matter. A single document uses a top-level `fields` mapping. When the service
@@ -349,52 +426,44 @@ are represented as lists of selected values.
 To use Large Language Models for image descriptions (currently only for pptx and image files), provide `llm_client` and `llm_model`:
 
 ```python
-from markitdown import MarkItDown
+from markitforge import MarkitForge
 from openai import OpenAI
 
 client = OpenAI(max_retries=5)
-md = MarkItDown(llm_client=client, llm_model="gpt-4o", llm_prompt="optional custom prompt")
+md = MarkitForge(llm_client=client, llm_model="gpt-4o", llm_prompt="optional custom prompt")
 result = md.convert("example.jpg")
 print(result.markdown)
 ```
 
 `max_retries` controls the OpenAI client's automatic retries for retryable errors (the default is 2); `5` allows up to six attempts with backoff. See the [OpenAI SDK retry documentation](https://github.com/openai/openai-python#retries).
 
-If any attempt succeeds, image conversion continues normally. If the client raises an error after exhausting its retries, or encounters a non-retryable error, MarkItDown tries other applicable converters and raises `FileConversionException` only if none succeeds.
+If any attempt succeeds, image conversion continues normally. If the client raises an error after exhausting its retries, or encounters a non-retryable error, MarkitForge tries other applicable converters and raises `FileConversionException` only if none succeeds.
 
 ### Docker
 
 ```sh
-docker build -t markitdown:latest .
-docker run --rm -i markitdown:latest < ~/your-file.pdf > output.md
+docker build -t markitforge:latest .
+docker run --rm -i markitforge:latest < ~/your-file.pdf > output.md
 ```
 
 ## Contributing
 
 Before starting significant work, please read [What to Contribute](#what-to-contribute), which describes what is in and out of scope for this repository.
 
-This project welcomes contributions and suggestions. Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+Contributions are welcome. Open an issue first for big changes. By contributing you agree your work is released under the MIT license.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
-
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+Fixes that are not MarkitForge-specific are best sent upstream to [microsoft/markitdown](https://github.com/microsoft/markitdown) too.
 
 ### What to Contribute
 
-MarkItDown is a Python utility for converting files to Markdown for use with LLMs and related text analysis pipelines. This repository is intended to provide Python libraries that can be incorporated into other systems — not the end-user applications built on top of them.
+MarkitForge is a Python utility for converting files to Markdown for use with LLMs and related text analysis pipelines. The core packages are Python libraries for other systems to build on. The one end-user app, `markitforge-gui`, stays a thin layer over the library.
 
 #### In scope
 
-- Improvements to the fidelity of existing converters (New formats are added sparingly -- especially if they incur new dependencies. In most cases, new formats can be better supported via [3rd-party plugins](#extending-markitdown-without-changing-this-repository).)
+- Improvements to the fidelity of existing converters (New formats are added sparingly -- especially if they incur new dependencies. In most cases, new formats can be better supported via [3rd-party plugins](#extending-markitforge-without-changing-this-repository).)
 - Bug fixes, performance improvements, and security fixes
-- The `markitdown` command-line interface
-- The `markitdown-mcp` package
+- The `markitforge` command-line interface
+- The `markitforge-mcp` package
 - Tests, documentation, and developer tooling
 
 #### Out of scope
@@ -405,18 +474,18 @@ We cannot accept additional applications, services, or servers. This includes:
 - Web frontends and browser-based user interfaces
 - Desktop and mobile applications (PyQt, PySide, Tkinter, Electron, Flutter, and similar)
 
-Projects like these are genuinely useful, and we would rather see them thrive than be turned away. If you are interested in providing a web service, API, or graphical application for MarkItDown, please maintain it as a separate package or project that depends on [`markitdown` from PyPI](https://pypi.org/project/markitdown/).
+Projects like these are genuinely useful, and we would rather see them thrive than be turned away. If you are interested in providing a web service, API, or graphical application for MarkitForge, please maintain it as a separate package or project that depends on [`markitforge` from PyPI](https://pypi.org/project/markitforge/).
 
-### Extending MarkItDown Without Changing This Repository
+### Extending MarkitForge Without Changing This Repository
 
-MarkItDown supports 3rd-party plugins, so support for a new format can be published and installed independently of this repository:
+MarkitForge supports 3rd-party plugins, so support for a new format can be published and installed independently of this repository:
 
 ```sh
-markitdown --list-plugins
-markitdown --use-plugins path-to-file.pdf
+markitforge --list-plugins
+markitforge --use-plugins path-to-file.pdf
 ```
 
-See `packages/markitdown-sample-plugin` to get started, and tag your repository `#markitdown-plugin` so that others can find it.
+See `packages/markitforge-sample-plugin` to get started, and tag your repository `#markitforge-plugin` so that others can find it.
 
 ### How to Contribute
 
@@ -433,10 +502,10 @@ You can help by looking at issues or helping review PRs. We have also marked som
 
 ### Running Tests and Checks
 
-- Navigate to the MarkItDown package:
+- Navigate to the MarkitForge package:
 
   ```sh
-  cd packages/markitdown
+  cd packages/markitforge
   ```
 
 - Install `hatch` in your environment and run tests:
@@ -458,13 +527,30 @@ You can help by looking at issues or helping review PRs. We have also marked som
 
 ### Security Considerations
 
-MarkItDown performs I/O with the privileges of the current process. Like `open()` or `requests.get()`, it will access resources that the process itself can access.
+MarkitForge performs I/O with the privileges of the current process. Like `open()` or `requests.get()`, it will access resources that the process itself can access.
 
-**Sanitize your inputs:** Do not pass untrusted input directly to MarkItDown. If any part of the input may be controlled by an untrusted user or system, such as in hosted or server-side applications, it must be validated and restricted before calling MarkItDown. Depending on your environment, this may include restricting file paths, limiting URI schemes and network destinations, and blocking access to private, loopback, link-local, or metadata-service addresses.
+**Sanitize your inputs:** Do not pass untrusted input directly to MarkitForge. If any part of the input may be controlled by an untrusted user or system, such as in hosted or server-side applications, it must be validated and restricted before calling MarkitForge. Depending on your environment, this may include restricting file paths, limiting URI schemes and network destinations, and blocking access to private, loopback, link-local, or metadata-service addresses.
 
-**Call only the conversion method you need:** Prefer the narrowest conversion API that fits your use case. MarkItDown's `convert()` method is intentionally permissive and can handle local files, remote URIs, and byte streams. If your application only needs to read local files, call `convert_local()` instead. If you need more control over URI fetching, call `requests.get()` yourself and pass the response object to `convert_response()`. For maximum control, open a stream to the input you want converted and call `convert_stream()`.
+**Block internal URLs on servers:** `MarkitForge(block_private_networks=True)` (or `MARKITFORGE_BLOCK_PRIVATE_URLS=1`) refuses URLs, including redirect hops, that resolve to private, loopback, link-local or cloud-metadata addresses. It is a resolve-then-connect check, so a hostile DNS server can still race it; for high-risk services also restrict egress at the network level. Downloads are capped by `max_download_bytes` (512 MB), `fetch_timeout` and `fetch_deadline` (300 s total).
+
+**Call only the conversion method you need:** Prefer the narrowest conversion API that fits your use case. MarkitForge's `convert()` method is intentionally permissive and can handle local files, remote URIs, and byte streams. If your application only needs to read local files, call `convert_local()` instead. If you need more control over URI fetching, call `requests.get()` yourself and pass the response object to `convert_response()`. For maximum control, open a stream to the input you want converted and call `convert_stream()`.
 
 Additionally, image captioning, speech transcription, Azure Document Intelligence, and Azure Content Understanding rely on web-hosted services to function. For local-only operations, install only the optional dependencies that you need and want to use.
+
+## License and attribution
+
+MarkitForge is a fork of [MarkItDown](https://github.com/microsoft/markitdown) by Microsoft Corporation, taken at upstream commit `ed17895`. It uses two licenses:
+
+| Code | License | File |
+|---|---|---|
+| Code from MarkItDown | **MIT**, Copyright (c) Microsoft Corporation. The original notice and text are unchanged. | [LICENSE](LICENSE) |
+| New MarkitForge code, and MarkitForge's changes to MarkItDown files | **Apache License 2.0**, Copyright 2026 MarkitForge contributors | [LICENSE-APACHE](LICENSE-APACHE), [NOTICE](NOTICE) |
+
+Each source file has an `SPDX-License-Identifier` header: `Apache-2.0` for new files, `MIT AND Apache-2.0` for MarkItDown files that MarkitForge changed, and `MIT` (or no header) for MarkItDown files that were only renamed. Every package ships the license files that apply to it. Code adapted from [dwml](https://github.com/xiilei/dwml) (Apache-2.0) is listed in [ThirdPartyNotices.md](packages/markitforge/ThirdPartyNotices.md).
+
+If you redistribute MarkitForge, keep `LICENSE`, `LICENSE-APACHE` and `NOTICE` with it.
+
+MarkitForge is an independent project. It is not affiliated with, sponsored by, or endorsed by Microsoft.
 
 ## Trademarks
 

@@ -1,0 +1,8 @@
+{
+  "docx_merged_cells/default": 1.0,
+  "pdf_report/default": 1.0,
+  "pdf_report/pdfminer": 0.6,
+  "pdf_two_column/default": 1.0,
+  "pdf_two_column/pdfminer": 0.75,
+  "xlsx_blanks_hidden/default": 1.0
+}

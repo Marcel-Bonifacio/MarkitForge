@@ -8,10 +8,10 @@ updates:
       default-days: 7
   - package-ecosystem: "pip"
     directories:
-      - "/packages/markitdown"
-      - "/packages/markitdown-mcp"
-      - "/packages/markitdown-ocr"
-      - "/packages/markitdown-sample-plugin"
+      - "/packages/markitforge"
+      - "/packages/markitforge-mcp"
+      - "/packages/markitforge-ocr"
+      - "/packages/markitforge-sample-plugin"
     schedule:
       interval: "weekly"
     cooldown:

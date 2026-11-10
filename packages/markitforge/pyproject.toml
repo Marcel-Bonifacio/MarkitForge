@@ -1,0 +1,122 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "markitforge"
+dynamic = ["version"]
+description = 'Convert PDFs, Office files, web pages and more to clean, structured Markdown'
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "LICENSE-APACHE", "NOTICE", "ThirdPartyNotices.md"]
+keywords = []
+authors = [
+  { name = "MarkitForge contributors" },
+  { name = "Adam Fourney", email = "adamfo@microsoft.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+  "beautifulsoup4",
+  "requests>=2.32.4",  # CVE-2024-47081: .netrc creds leak on crafted URLs
+  "certifi>=2026.10.19",
+  "markdownify",
+  "charset-normalizer",
+  "defusedxml",
+]
+
+[project.optional-dependencies]
+all = [
+  "magika>=0.6.1,<2",
+  "python-pptx",
+  "mammoth>=1.12.2,<2",
+  "pandas",
+  "openpyxl",
+  "xlrd",
+  "lxml",
+  "pdfminer.six>=20251230",
+  "pdfplumber>=0.11.9",
+  "olefile",
+  "pydub",
+  "SpeechRecognition>=3.10.4",
+  "youtube-transcript-api~=1.2.3",
+  "azure-ai-documentintelligence",
+  "azure-ai-contentunderstanding>=1.2.0b1",
+  "azure-identity",
+]
+magika = ["magika>=0.6.1,<2"]
+pptx = ["python-pptx"]
+docx = ["mammoth>=1.12.2,<2", "lxml"]
+xlsx = ["pandas", "openpyxl"]
+xls = ["pandas", "xlrd"]
+pdf = ["pdfminer.six>=20251230", "pdfplumber>=0.11.9"]
+outlook = ["olefile"]
+audio-transcription = ["pydub", "SpeechRecognition>=3.10.4"]
+youtube-transcription = ["youtube-transcript-api~=1.2.3"]
+az-doc-intel = ["azure-ai-documentintelligence", "azure-identity"]
+# >=1.2.0b1 required for to_llm_input() helper used by ContentUnderstandingConverter
+az-content-understanding = ["azure-ai-contentunderstanding>=1.2.0b1", "azure-identity"]
+
+[project.urls]
+Documentation = "https://github.com/Marcel-Bonifacio/MarkitForge#readme"
+Issues = "https://github.com/Marcel-Bonifacio/MarkitForge/issues"
+Source = "https://github.com/Marcel-Bonifacio/MarkitForge"
+Upstream = "https://github.com/microsoft/markitdown"
+
+[tool.hatch.version]
+path = "src/markitforge/__about__.py"
+
+[project.scripts]
+markitforge = "markitforge.__main__:main"
+
+[tool.hatch.envs.default]
+features = ["all"]
+
+[tool.hatch.envs.hatch-test]
+features = ["all"]
+extra-dependencies = [
+  "openai",
+  "pyyaml",
+]
+
+[tool.hatch.envs.types]
+features = ["all"]
+extra-dependencies = [
+  "openai",
+  "mypy>=1.0.0",
+]
+
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive --ignore-missing-imports {args:src/markitforge tests}"
+
+[tool.coverage.run]
+source_pkgs = ["markitforge", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/markitforge/__about__.py",
+]
+
+[tool.coverage.paths]
+markitforge = ["src/markitforge", "*/markitforge/src/markitforge"]
+tests = ["tests", "*/markitforge/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/markitforge", "LICENSE", "LICENSE-APACHE", "NOTICE", "ThirdPartyNotices.md"]

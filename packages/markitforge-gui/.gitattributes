@@ -1,0 +1,2 @@
+launchers/*.bat text eol=crlf
+launchers/*.command text eol=lf

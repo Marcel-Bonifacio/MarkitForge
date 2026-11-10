@@ -1,0 +1,28 @@
+From: <Saved by MF>
+Subject: MF Archive Subject
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="----=_MF_BOUNDARY"; type="text/html"
+
+------=_MF_BOUNDARY
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+Content-Location: file:///C:/docs/page.htm
+
+<html><head><title>MF Archive Page</title></head><body><h1>MF Archive Heading</h1><p>Caf=C3=A9 text with a =
+soft line break.</p><p><img src=3D"cid:logo@mf" alt=3D"cid image"></p><p><img src=3D"page_files/pic.png" alt=3D"located image"></p><table><tr><th colspan=3D2>Span</th></tr><tr><td>a</td><td>b</td></tr></table></body></html>
+
+------=_MF_BOUNDARY
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo@mf>
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==
+
+------=_MF_BOUNDARY
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Location: file:///C:/docs/page_files/pic.png
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==
+
+------=_MF_BOUNDARY--

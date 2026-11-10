@@ -22,8 +22,8 @@ RUN rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY . /app
 RUN pip --no-cache-dir install \
-    /app/packages/markitdown[all] \
-    /app/packages/markitdown-sample-plugin
+    /app/packages/markitforge[all] \
+    /app/packages/markitforge-sample-plugin
 
 # Default USERID and GROUPID
 ARG USERID=nobody
@@ -31,4 +31,4 @@ ARG GROUPID=nogroup
 
 USER $USERID:$GROUPID
 
-ENTRYPOINT [ "markitdown" ]
+ENTRYPOINT [ "markitforge" ]

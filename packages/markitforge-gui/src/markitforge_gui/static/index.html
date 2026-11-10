@@ -1,0 +1,229 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026-present MarkitForge contributors | SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>MarkitForge</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#viewer">Skip to the result</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 128 128" aria-hidden="true" focusable="false"><g fill="#B87333"><path d="M36 52V14h14l14 18 14-18h14v38H79V35L64 54 49 35v17z"/><path fill-rule="evenodd" d="M8 58H112l4 4v4l-4 4q-16 2-26 10l-2 12q4 6 12 8v12H76q-12-10-24 0H32V100q8-2 12-8l-2-12q-8-6-20-10Q12 66 8 58z M59 63h10v11h8L64 89 51 74h8z"/></g></svg>
+      <span class="brand-name">MarkitForge</span>
+      <span class="brand-tag">Turn files into Markdown</span>
+    </div>
+    <div class="top-actions">
+      <button type="button" id="open-md-btn" class="btn ghost">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z M13 3v5h5"/></svg>
+        Open .md file
+      </button>
+      <input type="file" id="open-md-input" accept=".md,.markdown,.mdown,.mkd,.txt,text/markdown,text/plain" hidden>
+      <a id="zip-btn" class="btn ghost" href="/api/zip" aria-disabled="true" tabindex="-1">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>
+        Download all (.zip)
+      </a>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar" aria-label="Add files and options">
+      <section class="dropzone" id="dropzone" aria-labelledby="dz-title">
+        <svg class="dz-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+          <path d="M14 34h-2a8 8 0 0 1-1-15.9A11 11 0 0 1 32.4 15 9 9 0 0 1 36 34h-2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M24 40V23m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h2 id="dz-title" class="dz-title">Drop files here</h2>
+        <p class="dz-help" id="dz-help">PDF, Word, PowerPoint, Excel, web pages, CSV, EPUB, images, audio and more. Up to <span id="limit-mb">200</span>&nbsp;MB each.</p>
+        <button type="button" id="choose-btn" class="btn primary" aria-describedby="dz-help">Choose files</button>
+        <input type="file" id="file-input" multiple hidden>
+      </section>
+
+      <form id="url-form" class="url-form" novalidate>
+        <label for="url-input" class="label">Or convert a web page</label>
+        <div class="url-row">
+          <input id="url-input" name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false"
+                 placeholder="https://… (article, Wikipedia, YouTube)" aria-describedby="url-help">
+          <button class="btn" type="submit">Convert</button>
+        </div>
+        <p id="url-help" class="help">Paste a link to a web page or video. MarkitForge downloads it and converts it.</p>
+      </form>
+
+      <details class="options" id="options">
+        <summary>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h10m4 0h2M4 17h4m4 0h8M14 5v4M8 15v4"/></svg>
+          Options
+        </summary>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-page-markers"> Mark where each page starts</label>
+          <p class="help">Adds a small marker before every page, slide or sheet.</p>
+        </div>
+        <div class="option">
+          <label class="label" for="opt-table-format">Tables</label>
+          <select id="opt-table-format" aria-describedby="help-table-format">
+            <option value="markdown">Simple Markdown tables</option>
+            <option value="html">Keep complex tables (HTML)</option>
+            <option value="auto">Choose automatically</option>
+          </select>
+          <p class="help" id="help-table-format">HTML keeps merged cells but is harder to read as plain text.</p>
+        </div>
+        <div class="option">
+          <label class="label" for="opt-pdf-backend">PDF reading engine</label>
+          <select id="opt-pdf-backend" aria-describedby="help-pdf-backend">
+            <option value="auto">Automatic (recommended)</option>
+            <option value="pdfplumber">pdfplumber: good with tables</option>
+            <option value="pdfminer">pdfminer: fast, plain text</option>
+            <option value="docling">Docling: best layout (extra install)</option>
+          </select>
+          <p class="help" id="help-pdf-backend">Only used for PDF files.</p>
+        </div>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-hidden-sheets"> Include hidden spreadsheet sheets</label>
+          <p class="help">Excel files only.</p>
+        </div>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-headers-footers"> Include page headers and footers</label>
+          <p class="help">Word documents only.</p>
+        </div>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-keep-images"> Keep pictures inside the Markdown</label>
+          <p class="help">Embeds images directly in the text. Files get much larger.</p>
+        </div>
+        <p class="help options-note">Options apply to the next files you convert.</p>
+      </details>
+
+      <section class="files" aria-labelledby="files-title">
+        <div class="files-head">
+          <h2 id="files-title">Your files</h2>
+          <button type="button" id="clear-btn" class="btn small ghost" hidden>Clear list</button>
+        </div>
+        <ul id="file-list" class="file-list"></ul>
+        <p id="files-empty" class="muted small-text">Converted files will show up here.</p>
+      </section>
+    </aside>
+
+    <section id="viewer" class="viewer" tabindex="-1" aria-label="Result">
+      <div id="viewer-empty" class="viewer-empty">
+        <div class="empty-card">
+          <h1>Convert anything to Markdown</h1>
+          <ol class="steps">
+            <li><strong>Add a file</strong> by dropping it anywhere in this window, or with <em>Choose files</em>.</li>
+            <li><strong>Look at the result</strong>: a nicely formatted preview, the raw Markdown, and document details.</li>
+            <li><strong>Save it</strong> with <em>Download .md</em>, or copy it to paste somewhere else.</li>
+          </ol>
+          <p class="muted">Everything happens on this computer. Your files are not uploaded to the internet.</p>
+        </div>
+      </div>
+
+      <div id="viewer-status" class="viewer-status" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="viewer-status-text">Converting…</p>
+      </div>
+
+      <div id="viewer-error" class="viewer-error" hidden>
+        <div class="error-card" role="alert">
+          <h2 id="error-title">Couldn't convert this file</h2>
+          <p id="error-message"></p>
+          <pre id="error-hint" class="hint" hidden></pre>
+          <details id="error-detail-wrap" hidden><summary>Technical details</summary><pre id="error-detail"></pre></details>
+          <button type="button" id="retry-btn" class="btn">Try again</button>
+        </div>
+      </div>
+
+      <div id="viewer-content" class="viewer-content" hidden>
+        <div class="viewer-head">
+          <div class="doc-heading">
+            <h2 id="doc-title"></h2>
+            <p id="doc-sub" class="muted"></p>
+          </div>
+          <div class="actions">
+            <button type="button" id="copy-btn" class="btn">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 9h10v11H9zM5 15V4h10"/></svg>
+              Copy
+            </button>
+            <a id="download-btn" class="btn primary" href="#">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>
+              <span id="download-label">Download .md</span>
+            </a>
+          </div>
+        </div>
+
+        <div id="selection-banner" class="banner" hidden>
+          <span id="selection-text"></span>
+          <button type="button" id="show-all-btn" class="btn small">Show all pages</button>
+        </div>
+
+        <div class="tabs" role="tablist" aria-label="How to show the result">
+          <button type="button" role="tab" id="tab-preview" aria-controls="panel-preview" aria-selected="true">Preview</button>
+          <button type="button" role="tab" id="tab-markdown" aria-controls="panel-markdown" aria-selected="false" tabindex="-1">Markdown</button>
+          <button type="button" role="tab" id="tab-details" aria-controls="panel-details" aria-selected="false" tabindex="-1">
+            Details <span id="warn-badge" class="badge" hidden></span>
+          </button>
+        </div>
+
+        <div class="panels">
+          <div role="tabpanel" id="panel-preview" aria-labelledby="tab-preview" tabindex="0">
+            <article id="preview" class="prose"></article>
+          </div>
+          <div role="tabpanel" id="panel-markdown" aria-labelledby="tab-markdown" tabindex="0" hidden>
+            <div class="code">
+              <pre id="gutter" class="gutter" aria-hidden="true"></pre>
+              <pre id="source" class="source" aria-label="Markdown source"></pre>
+            </div>
+          </div>
+          <div role="tabpanel" id="panel-details" aria-labelledby="tab-details" tabindex="0" hidden>
+            <div class="details">
+              <section id="warnings-section" class="warnings" hidden aria-labelledby="warnings-title">
+                <h3 id="warnings-title">Things to check</h3>
+                <ul id="warnings-list"></ul>
+              </section>
+
+              <section id="pages-section" aria-labelledby="pages-title" hidden>
+                <h3 id="pages-title">Pages</h3>
+                <form id="range-form" class="range-form">
+                  <label for="range-input" class="label">Show only these pages</label>
+                  <div class="url-row">
+                    <input id="range-input" type="text" inputmode="numeric" placeholder="e.g. 1-3, 5, 8-" aria-describedby="range-help" spellcheck="false">
+                    <button type="submit" class="btn">Show</button>
+                  </div>
+                  <p id="range-help" class="help">Preview, Markdown, Copy and Download then use just those pages.</p>
+                  <p id="range-error" class="field-error" role="alert" hidden></p>
+                </form>
+                <ul id="pages-list" class="pages-list"></ul>
+              </section>
+
+              <section aria-labelledby="meta-title">
+                <h3 id="meta-title">Document information</h3>
+                <table class="kv" id="meta-table"><tbody></tbody></table>
+                <p id="meta-empty" class="muted" hidden>No extra information was found in this file.</p>
+              </section>
+
+              <section id="assets-section" aria-labelledby="assets-title" hidden>
+                <h3 id="assets-title">Embedded items</h3>
+                <div class="table-wrap">
+                  <table class="grid" id="assets-table">
+                    <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Size</th><th scope="col">Page</th><th scope="col">Description</th></tr></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="drop-overlay" class="drop-overlay" hidden aria-hidden="true">
+    <div class="drop-overlay-inner">Drop to convert</div>
+  </div>
+  <div id="live" class="visually-hidden" aria-live="polite"></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

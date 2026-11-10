@@ -1,0 +1,31 @@
+MarkitForge
+Copyright 2026 MarkitForge contributors
+
+This product is licensed under the Apache License, Version 2.0 (see
+LICENSE-APACHE), except for the parts derived from MarkItDown, which remain
+under the MIT License (see LICENSE). Each source file states its license in an
+SPDX-License-Identifier header; files without one are MIT, from MarkItDown.
+
+-------------------------------------------------------------------------------
+This product includes software from MarkItDown
+  https://github.com/microsoft/markitdown
+  Copyright (c) Microsoft Corporation.
+  Licensed under the MIT License (full text in LICENSE).
+  Forked from upstream commit ed17895, November 2026.
+
+Files from MarkItDown that MarkitForge modified carry the identifier
+"MIT AND Apache-2.0": the MarkItDown portions are MIT, the MarkitForge
+changes are Apache-2.0. The package and module names were changed from
+"markitdown" to "markitforge" in all files.
+
+-------------------------------------------------------------------------------
+This product includes software from dwml (via MarkItDown)
+  https://github.com/xiilei/dwml
+  Licensed under the Apache License, Version 2.0.
+  Files: packages/markitforge/src/markitforge/converter_utils/docx/math/
+  See packages/markitforge/ThirdPartyNotices.md.
+
+-------------------------------------------------------------------------------
+"Microsoft" and "MarkItDown" are used only to identify the upstream project.
+MarkitForge is independent and is not affiliated with, sponsored by, or
+endorsed by Microsoft.

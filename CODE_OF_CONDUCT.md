@@ -1,9 +1,10 @@
-# Microsoft Open Source Code of Conduct
+# Code of Conduct
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
+MarkitForge follows the [Contributor Covenant, version 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
 
-Resources:
+Be respectful and constructive. Report unacceptable behaviour privately to the
+repository maintainers through GitHub (for example by opening a private security
+advisory, or by contacting a maintainer listed on the repository page).
 
-- [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/)
-- [Microsoft Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
-- Contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with questions or concerns
+(The upstream MarkItDown project uses the Microsoft Open Source Code of Conduct,
+which covers Microsoft-run projects; MarkitForge is not run by Microsoft.)

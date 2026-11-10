@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "markitforge-gui"
+dynamic = ["version"]
+description = 'A friendly local web app for converting files to Markdown with "markitforge".'
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE-APACHE", "NOTICE"]
+keywords = ["markdown", "converter", "gui"]
+authors = [
+  { name = "MarkitForge contributors" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+  "markitforge[all]>=0.1.9,<0.2.0",
+  "starlette>=0.47.2",  # CVE-2025-54121 (multipart upload DoS)
+  "uvicorn>=0.30",
+  "python-multipart>=0.0.18",  # CVE-2024-53981 (multipart parser DoS)
+  "markdown-it-py>=3.0",
+  "nh3>=0.2.14",
+  "anyio>=4.0",
+  "requests>=2.32.4",  # CVE-2024-47081 (.netrc credential leak)
+]
+
+[project.optional-dependencies]
+window = [
+  "pywebview>=5.0",
+]
+test = [
+  "pytest",
+  "pytest-timeout",
+  "httpx",
+]
+
+[project.urls]
+Documentation = "https://github.com/microsoft/markitdown#readme"
+Issues = "https://github.com/microsoft/markitdown/issues"
+Source = "https://github.com/microsoft/markitdown"
+
+[tool.hatch.version]
+path = "src/markitforge_gui/__about__.py"
+
+[project.scripts]
+markitforge-gui = "markitforge_gui.__main__:main"
+
+[tool.hatch.envs.types]
+extra-dependencies = [
+  "mypy>=1.0.0",
+]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/markitforge_gui tests}"
+
+[tool.coverage.run]
+source_pkgs = ["markitforge-gui", "tests"]
+branch = true
+parallel = true
+omit = [
+  "src/markitforge_gui/__about__.py",
+]
+
+[tool.coverage.paths]
+markitforge-gui = ["src/markitforge_gui", "*/markitforge-gui/src/markitforge_gui"]
+tests = ["tests", "*/markitforge-gui/tests"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "no cov",
+  "if __name__ == .__main__.:",
+  "if TYPE_CHECKING:",
+]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/markitforge_gui", "LICENSE-APACHE", "NOTICE"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/markitforge_gui"]
