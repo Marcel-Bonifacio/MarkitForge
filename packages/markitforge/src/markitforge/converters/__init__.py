@@ -31,6 +31,7 @@ from ._epub_converter import EpubConverter
 from ._csv_converter import CsvConverter
 from ._libreoffice_converter import LibreOfficeConverter
 from ._mhtml_converter import MhtmlConverter
+from ._eml_converter import EmlConverter
 
 __all__ = [
     "PlainTextConverter",
@@ -57,4 +58,5 @@ __all__ = [
     "CsvConverter",
     "LibreOfficeConverter",
     "MhtmlConverter",
+    "EmlConverter",
 ]

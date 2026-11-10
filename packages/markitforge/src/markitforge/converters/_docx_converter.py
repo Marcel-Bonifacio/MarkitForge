@@ -21,6 +21,7 @@ from ..converter_utils.docx.headers_footers import read_headers_footers
 from ..converter_utils.docx.page_breaks import (
     PAGE_COUNT_MODES,
     libreoffice_page_count,
+    read_app_pages,
     new_sentinel,
     remove_sentinels,
     split_pages,
@@ -34,14 +35,18 @@ from .._base_converter import (
 )
 from .._stream_info import StreamInfo
 from .._exceptions import MissingDependencyException, MISSING_DEPENDENCY_MESSAGE
+from .._progress import check_cancelled, report_progress
 from ..converter_utils._archive_limits import (
     ArchiveLimits,
     CaptionCache,
+    ImageAssets,
     InlineBudget,
     check_archive_stream,
     data_uri_length,
     get_budget,
+    wants_images,
 )
+from ..converter_utils._text_safety import safe_alt_text
 
 # Try loading optional (but in this case, required) dependencies
 # Save reporting of any exceptions for later
@@ -118,12 +123,18 @@ class _DocxImageHandler:
       document; later images get their part name as src, with a warning.
     * With ``describe_images`` each distinct image is captioned once by the
       LLM, at most ``max_llm_calls`` times, and recorded once as an asset.
+    * With ``extract_images`` each distinct image (by its bytes) becomes one
+      asset (``image1.png``, ...) and the Markdown references it by that
+      name; this wins over ``keep_data_uris``.
     """
 
     def __init__(self, options: Dict[str, Any], *, describe: bool):
         limits = ArchiveLimits.from_kwargs(options)
         self._keep_data_uris = bool(options.get("keep_data_uris", False))
         self._describe = describe
+        self._export: Optional[ImageAssets] = (
+            ImageAssets() if wants_images(options) else None
+        )
         self._client = options.get("llm_client")
         self._model = options.get("llm_model")
         self._prompt = options.get("llm_prompt")
@@ -133,7 +144,7 @@ class _DocxImageHandler:
             limits.max_llm_calls,
             similar=bool(options.get("dedupe_similar_images", True)),
         )
-        self.assets: List[DocumentAsset] = []
+        self._described: List[DocumentAsset] = []
         self._warnings: List[str] = []
         if describe and (self._client is None or self._model is None):
             self._warnings.append(
@@ -145,11 +156,17 @@ class _DocxImageHandler:
     def warnings(self) -> List[str]:
         return self._warnings + self._captions.warnings + self._inline.warnings
 
+    @property
+    def assets(self) -> List[DocumentAsset]:
+        if self._export is not None:
+            return self._export.assets
+        return self._described
+
     def convert_image(self, image: Any) -> List[Any]:
         from mammoth import html as mammoth_html
 
         attributes: Dict[str, str] = {}
-        if not (self._keep_data_uris or self._describe):
+        if not (self._keep_data_uris or self._describe or self._export is not None):
             # Opening (not reading) keeps mammoth's handling of broken
             # references: InvalidFileReferenceError drops the image.
             with image.open():
@@ -163,6 +180,8 @@ class _DocxImageHandler:
         if self._describe:
             self._describe_entry(entry)
         alt = entry.caption or image.alt_text
+        if self._export is not None:
+            alt = safe_alt_text(alt)
         if alt:
             attributes["alt"] = alt
         attributes["src"] = self._src(entry)
@@ -186,8 +205,13 @@ class _DocxImageHandler:
             data,
         )
         self._images[key] = entry
-        if self._describe:
-            self.assets.append(
+        if self._export is not None:
+            # Parts with identical bytes share one asset (and one name).
+            entry.name = self._export.add(
+                data, content_type, prefix="image", description=image.alt_text
+            )
+        elif self._describe:
+            self._described.append(
                 DocumentAsset(
                     name=entry.name,
                     mime_type=content_type,
@@ -233,6 +257,8 @@ class _DocxImageHandler:
                     asset.description = text
 
     def _src(self, entry: _Image) -> str:
+        if self._export is not None:
+            return entry.name
         if not self._keep_data_uris:
             return "data:{0};base64,".format(entry.src_type)
         data = entry.data or b""
@@ -311,6 +337,9 @@ class DocxConverter(HtmlConverter):
                 "docx_page_count must be one of "
                 f"{', '.join(PAGE_COUNT_MODES)} (or None); got {page_count_mode!r}"
             )
+
+        check_cancelled(kwargs)
+        report_progress(kwargs, "page", 0, 1)
 
         # Reject archive bombs before anything reads a member.
         budget = get_budget(kwargs)
@@ -395,30 +424,21 @@ class DocxConverter(HtmlConverter):
                 metadata["footers"] = footers
 
         if page_count_mode is not None:
-            # "pages" stays as split at the breaks stored in the file; the
-            # metadata says how many pages the document really has.
-            if rendered_pages is None:
-                metadata["page_count"] = len(sections)
-                metadata["page_count_source"] = "stored_breaks"
-                warnings.append(
-                    f"docx_page_count={page_count_mode!r}: {page_count_problem}; "
-                    "page_count is the number of sections found from the page "
-                    "breaks stored in the file."
-                )
-            else:
-                metadata["page_count"] = rendered_pages
-                metadata["page_count_source"] = page_count_mode
-                if rendered_pages != len(sections):
-                    warnings.append(
-                        f"LibreOffice lays this document out on {rendered_pages} "
-                        f"page(s), but the page breaks stored in the file give "
-                        f"{len(sections)} section(s); 'pages' follows the stored "
-                        "breaks and may not match the real pages."
-                    )
+            self._page_count(
+                metadata,
+                warnings,
+                mode=page_count_mode,
+                sections=len(sections),
+                has_breaks=sentinel in result.markdown,
+                app_pages=read_app_pages(file_stream),
+                rendered_pages=rendered_pages,
+                problem=page_count_problem,
+            )
 
         assets: List[DocumentAsset] = images.assets
         warnings.extend(images.warnings)
 
+        report_progress(kwargs, "page", 1, 1)
         return DocumentConverterResult(
             markdown=markdown,
             title=result.title if result.title else metadata.get("title"),
@@ -427,6 +447,67 @@ class DocxConverter(HtmlConverter):
             assets=assets,
             warnings=warnings,
         )
+
+    @staticmethod
+    def _page_count(
+        metadata: Dict[str, Any],
+        warnings: List[str],
+        *,
+        mode: str,
+        sections: int,
+        has_breaks: bool,
+        app_pages: Optional[int],
+        rendered_pages: Optional[int],
+        problem: str,
+    ) -> None:
+        """Set ``page_count`` and ``page_count_source`` for ``docx_page_count``.
+
+        Sources, best first: ``"libreoffice"`` (a real layout, only in that
+        mode), ``"breaks"`` (the page breaks stored in the file, which also
+        split ``pages``) and ``"app.xml"`` (the ``<Pages>`` statistic Word
+        saved, used when the file stores no breaks at all). "pages" always
+        follows the stored breaks.
+        """
+        if mode == "libreoffice" and rendered_pages is not None:
+            metadata["page_count"] = rendered_pages
+            metadata["page_count_source"] = "libreoffice"
+            if rendered_pages != sections:
+                warnings.append(
+                    f"LibreOffice lays this document out on {rendered_pages} "
+                    f"page(s), but the page breaks stored in the file give "
+                    f"{sections} section(s); 'pages' follows the stored "
+                    "breaks and may not match the real pages."
+                )
+            return
+
+        if has_breaks or app_pages is None:
+            metadata["page_count"] = sections
+            metadata["page_count_source"] = "breaks"
+            fallback = (
+                "page_count is the number of sections found from the page "
+                "breaks stored in the file"
+            )
+        else:
+            metadata["page_count"] = app_pages
+            metadata["page_count_source"] = "app.xml"
+            fallback = (
+                "the file stores no page breaks, so page_count is the page "
+                "count Word saved in docProps/app.xml"
+            )
+        if mode == "libreoffice":
+            warnings.append(f"docx_page_count={mode!r}: {problem}; {fallback}.")
+        if (
+            metadata["page_count_source"] == "breaks"
+            and app_pages is not None
+            and app_pages != sections
+        ):
+            warnings.append(
+                f"The page breaks stored in the file give {sections} page(s), "
+                f"but docProps/app.xml records {app_pages}; 'pages' and "
+                "page_count follow the stored breaks and may not match the "
+                "real pages (docx_page_count='libreoffice' lays the document "
+                "out)."
+            )
 
     def _image_to_html(
         self,

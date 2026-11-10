@@ -33,6 +33,7 @@ past its declared size or past the cap is cut off. A limit hit raises
 """
 
 import hashlib
+import re
 import io
 import warnings
 import zipfile
@@ -462,3 +463,135 @@ class CaptionCache:
         result = produce()
         self._captions[key] = result
         return result
+
+
+# ------------------------------------------------------------ image export
+
+#: Keyword argument that turns on image export (``extract_images``).
+EXTRACT_IMAGES_KWARG = "extract_images"
+
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_EXTENSION_OVERRIDES = {
+    "image/jpeg": ".jpeg",
+    "image/jpg": ".jpeg",
+    "image/pjpeg": ".jpeg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/x-ms-bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+    "image/x-emf": ".emf",
+    "image/emf": ".emf",
+    "image/x-wmf": ".wmf",
+    "image/wmf": ".wmf",
+    "image/heic": ".heic",
+}
+
+
+def wants_images(kwargs: Mapping[str, Any]) -> bool:
+    """Whether the caller asked for ``extract_images``."""
+    return bool(kwargs.get(EXTRACT_IMAGES_KWARG, False))
+
+
+def image_extension(mime_type: Optional[str], fallback: str = "") -> str:
+    """A file extension (with dot) for an image media type."""
+    mime = (mime_type or "").split(";")[0].strip().lower()
+    if mime in _EXTENSION_OVERRIDES:
+        return _EXTENSION_OVERRIDES[mime]
+    fallback = fallback.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,8}", fallback):
+        return fallback
+    import mimetypes
+
+    return mimetypes.guess_extension(mime) or ".bin"
+
+
+def safe_asset_name(name: str, default: str = "image") -> str:
+    """A file name without directories, spaces or other unsafe characters."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    base = _UNSAFE_NAME_CHARS.sub("_", base).strip("._-")
+    return base[:100] or default
+
+
+class ImageAssets:
+    """The distinct images of one document, for the ``extract_images`` option.
+
+    Each distinct image (by the SHA-256 of its bytes) becomes one
+    :class:`~markitforge._base_converter.DocumentAsset` with a safe, unique
+    file name; :meth:`add` returns that name so the Markdown can reference
+    it as ``![alt](name)``. Repeats of an image return the first name.
+    """
+
+    def __init__(self) -> None:
+        from .._base_converter import DocumentAsset
+
+        self._asset_type = DocumentAsset
+        self.assets: List[Any] = []
+        self._by_hash: Dict[str, str] = {}
+        self._names: set = set()
+        self._counters: Dict[str, int] = {}
+
+    def __len__(self) -> int:
+        return len(self.assets)
+
+    def __bool__(self) -> bool:
+        # An empty collection is still "image export is on".
+        return True
+
+    def _unique(self, name: str) -> str:
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            stem, ext = name, ""
+        candidate = name
+        n = 2
+        while candidate.lower() in self._names:
+            candidate = f"{stem}_{n}.{ext}" if ext else f"{stem}_{n}"
+            n += 1
+        self._names.add(candidate.lower())
+        return candidate
+
+    def add(
+        self,
+        data: bytes,
+        mime_type: Optional[str],
+        *,
+        prefix: str = "image",
+        name: Optional[str] = None,
+        page: Optional[int] = None,
+        description: Optional[str] = None,
+    ) -> str:
+        """Record an image and return its asset name.
+
+        Without ``name`` the asset is called ``<prefix><n><ext>``, numbered
+        per prefix (``image1.png``, ``slide3_img2.jpeg``). With ``name`` (the
+        image's own file name, say) that name is made safe and unique.
+        """
+        key = hashlib.sha256(data).hexdigest()
+        known = self._by_hash.get(key)
+        if known is not None:
+            return known
+        if name:
+            base = safe_asset_name(name)
+            stem, dot, ext = base.rpartition(".")
+            if not dot or not stem:
+                base = base + image_extension(mime_type)
+            chosen = self._unique(base)
+        else:
+            count = self._counters.get(prefix, 0) + 1
+            self._counters[prefix] = count
+            chosen = self._unique(
+                f"{safe_asset_name(prefix)}{count}{image_extension(mime_type)}"
+            )
+        self._by_hash[key] = chosen
+        self.assets.append(
+            self._asset_type(
+                name=chosen,
+                mime_type=mime_type or None,
+                data=data,
+                description=description or None,
+                page=page,
+            )
+        )
+        return chosen

@@ -1,6 +1,6 @@
 # MarkitForge OCR Plugin
 
-> Part of [MarkitForge](https://github.com/Marcel-Bonifacio/MarkitForge), a fork of [MarkItDown](https://github.com/microsoft/markitdown) (MIT, Copyright (c) Microsoft Corporation). This package is derived from the MarkItDown OCR plugin; see `LICENSE`.
+> Part of [MarkitForge](https://github.com/Marcel-Bonifacio/MarkitForge), a fork of [MarkItDown](https://github.com/microsoft/markitdown) (MIT, Copyright (c) Microsoft Corporation). This package is derived from the MarkItDown OCR plugin; see `LICENSE`, `LICENSE-APACHE` and `NOTICE`.
 
 LLM Vision plugin for MarkitForge that extracts text from images embedded in PDF, DOCX, PPTX, and XLSX files.
 
@@ -112,7 +112,7 @@ The DOCX, PPTX, and XLSX converters subclass their core counterparts and overrid
 
 - Embedded images are extracted by position (via `page.images` / page XObjects) and OCR'd inline, interleaved with the surrounding text in vertical reading order.
 - **Scanned PDFs** (pages with no extractable text) are detected automatically: each page is rendered at 300 DPI and sent to the LLM as a full-page image.
-- **Malformed PDFs** that pdfplumber/pdfminer cannot open (e.g. truncated EOF) are retried with PyMuPDF page rendering, so content is still recovered.
+- **Malformed PDFs** that pdfplumber/pdfminer cannot open (e.g. truncated EOF) are retried with PDFium page rendering (pypdfium2), so content is still recovered.
 
 ### DOCX
 
@@ -202,7 +202,7 @@ Contributions are welcome! See the [MarkitForge repository](https://github.com/M
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT AND Apache-2.0: the parts derived from MarkItDown are MIT (see [LICENSE](LICENSE)), the MarkitForge changes are Apache-2.0 (see [LICENSE-APACHE](LICENSE-APACHE) and [NOTICE](NOTICE)). Each source file states its license in an SPDX header.
 
 ## Changelog
 

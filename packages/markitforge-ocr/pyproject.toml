@@ -8,8 +8,8 @@ dynamic = ["version"]
 description = 'OCR plugin for MarkitForge - Extracts text from images in PDF, DOCX, PPTX, and XLSX via LLM Vision'
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "LICENSE-APACHE", "NOTICE"]
 keywords = ["markitforge", "ocr", "pdf", "docx", "xlsx", "pptx", "llm", "vision"]
 authors = [
   { name = "Contributors", email = "noreply@github.com" },
@@ -26,10 +26,10 @@ classifiers = [
 
 # Core dependencies — matches the file-format libraries markitforge already uses
 dependencies = [
-  "markitforge>=0.1.9,<0.2.0",
+  "markitforge>=0.2.0,<0.3.0",
   "pdfminer.six>=20251230",
   "pdfplumber>=0.11.9",
-  "PyMuPDF>=1.24.0,<2",
+  "pypdfium2>=4.30.0",
   "mammoth>=1.12.2,<2",
   "python-docx",
   "python-pptx",
@@ -52,6 +52,9 @@ Source = "https://github.com/Marcel-Bonifacio/MarkitForge"
 
 [tool.hatch.version]
 path = "src/markitforge_ocr/__about__.py"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/markitforge_ocr", "README.md", "LICENSE", "LICENSE-APACHE", "NOTICE"]
 
 # CRITICAL: Plugin entry point - MarkitForge will discover this plugin through this entry point
 [project.entry-points."markitforge.plugin"]

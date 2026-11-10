@@ -12,6 +12,7 @@ from typing import BinaryIO, Any, List, Optional, TYPE_CHECKING
 
 from .._base_converter import DocumentConverter, DocumentConverterResult
 from .._stream_info import StreamInfo
+from .._progress import check_cancelled, report_progress
 from .._exceptions import (
     FileConversionException,
     ResourceLimitException,
@@ -122,6 +123,10 @@ class ZipConverter(DocumentConverter):
         ``max_archive_bytes``. A member that is an archive itself (a nested
         ZIP, or a DOCX/XLSX/PPTX/EPUB package) is counted once: what it
         holds is charged only beyond the size already charged for the member.
+
+        Progress is reported per member of the outermost archive (stage
+        ``"entry"``); a cancellation
+        (``ConversionCancelled``) is never turned into a warning.
         """
         file_path = (
             stream_info.url
@@ -147,18 +152,22 @@ class ZipConverter(DocumentConverter):
                 )
             return DocumentConverterResult(markdown=parts[0], warnings=warnings)
 
-        # Drop the metadata describing the outer *archive*
+        # Drop the metadata describing the outer *archive*. Members do not
+        # report progress of their own: the stream stays one series of
+        # "entry" events (cancellation still reaches them).
         member_kwargs = {
             key: value
             for key, value in kwargs.items()
-            if key not in ("file_extension", "url")
+            if key not in ("file_extension", "url", "progress")
         }
         member_kwargs[BUDGET_KWARG] = budget
 
         budget.depth += 1
         try:
             with zipfile.ZipFile(file_stream, "r") as zipObj:
-                for entry in zipObj.infolist():
+                entries = zipObj.infolist()
+                for done, entry in enumerate(entries, start=1):
+                    check_cancelled(kwargs)
                     if budget.exhausted is not None:
                         break
                     name = entry.filename
@@ -169,6 +178,7 @@ class ZipConverter(DocumentConverter):
                         data = read_member(zipObj, entry, budget)
                     except ResourceLimitException as exc:
                         warnings.append(f"Skipped `{name}`: {exc}")
+                        report_progress(kwargs, "entry", done, len(entries))
                         continue
 
                     result: Optional[DocumentConverterResult] = None
@@ -202,6 +212,7 @@ class ZipConverter(DocumentConverter):
                     if result is not None:
                         parts.append(f"## File: {name}\n\n{result.markdown}")
                         warnings.extend(f"{name}: {w}" for w in result.warnings)
+                    report_progress(kwargs, "entry", done, len(entries))
         finally:
             budget.depth -= 1
 

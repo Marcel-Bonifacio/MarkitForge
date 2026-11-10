@@ -193,8 +193,53 @@ def split_pages(markdown: str, sentinel: str) -> List[str]:
 
 # ------------------------------------------------------ rendered page count
 
-#: Accepted values of the ``docx_page_count`` option (besides ``None``).
-PAGE_COUNT_MODES = ("libreoffice",)
+#: Accepted values of the ``docx_page_count`` option (besides ``None``):
+#: ``"stored"`` counts from the file alone (its stored page breaks, else the
+#: ``<Pages>`` statistic in docProps/app.xml); ``"libreoffice"`` lays the
+#: document out with LibreOffice and falls back to ``"stored"``.
+PAGE_COUNT_MODES = ("libreoffice", "stored")
+
+_APP_PART = "docProps/app.xml"
+_APP_MAX_BYTES = 1024 * 1024
+
+
+def read_app_pages(file_stream: Any) -> Optional[int]:
+    """The ``<Pages>`` count Word saved in docProps/app.xml, or ``None``.
+
+    One page with no words and no characters is a template's statistics,
+    never updated by the program that wrote the file (python-docx, for
+    one), and is ignored. The stream position is restored.
+    """
+    import zipfile
+
+    from defusedxml import ElementTree as ET
+
+    position = file_stream.tell()
+    try:
+        with zipfile.ZipFile(file_stream) as archive:
+            info = archive.getinfo(_APP_PART)
+            if info.file_size > _APP_MAX_BYTES:
+                return None
+            root = ET.fromstring(archive.read(info))
+    except Exception:
+        return None
+    finally:
+        file_stream.seek(position)
+    values = {}
+    for child in root:
+        name = child.tag.rsplit("}", 1)[-1]
+        if name in ("Pages", "Words", "Characters"):
+            try:
+                values[name] = int((child.text or "").strip())
+            except ValueError:
+                pass
+    pages = values.get("Pages")
+    if pages is None or pages < 1:
+        return None
+    if pages == 1 and values.get("Words") == 0 and values.get("Characters") == 0:
+        return None
+    return pages
+
 
 _DOCX_FILTER = "MS Word 2007 XML"
 _PDF_TARGET = "pdf:writer_pdf_Export"

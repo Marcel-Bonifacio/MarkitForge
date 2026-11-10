@@ -304,7 +304,10 @@ def test_html_table_format_sanitizes() -> None:
         '<tr><td rowspan="999999">&lt;script&gt;</td><td data-x="1">*y*</td></tr></table>'
     )
     md = HtmlConverter().convert_string(html, table_format="html").markdown
-    assert md.startswith('<table>\n<thead>\n<tr><th colspan="2">H &amp; B</th></tr>')
+    # Safe inline markup (<b> -> <strong>) is kept inside cells.
+    assert md.startswith(
+        '<table>\n<thead>\n<tr><th colspan="2">H &amp; <strong>B</strong></th></tr>'
+    )
     assert '<td rowspan="1000">&lt;script&gt;</td><td>*y*</td>' in md
     assert "onclick" not in md and "style" not in md and "class" not in md
     assert "data-x" not in md

@@ -12,6 +12,10 @@ references (by ``cid:`` or Content-Location) are inlined as data URIs when
 URIs of a document total at most ``max_inline_bytes`` characters (default
 50 MiB); past that, images keep their original reference and a warning is
 added.
+
+With ``extract_images`` each distinct image part (by its bytes) becomes one
+asset with a safe, unique file name, and the ``<img>`` tags that show it are
+pointed at that name (this wins over ``keep_data_uris``).
 """
 
 import base64
@@ -28,9 +32,12 @@ from .._base_converter import DocumentAsset, DocumentConverter, DocumentConverte
 from .._stream_info import StreamInfo
 from ..converter_utils._archive_limits import (
     ArchiveLimits,
+    ImageAssets,
     InlineBudget,
     data_uri_length,
+    wants_images,
 )
+from ..converter_utils._text_safety import safe_alt_text
 from ._html_converter import HtmlConverter
 
 ACCEPTED_FILE_EXTENSIONS = [".mht", ".mhtml"]
@@ -103,6 +110,10 @@ class MhtmlConverter(DocumentConverter):
         by_basename: Dict[str, _Resource] = {}
         by_cid: Dict[str, _Resource] = {}
         assets: List[DocumentAsset] = []
+        export = ImageAssets() if wants_images(kwargs) else None
+        #: id(resource) -> asset name, with the resources kept alive.
+        exported: Dict[int, str] = {}
+        resources: List[_Resource] = []
 
         start = (message.get_param("start") or "") if message.is_multipart() else ""
         start = str(start).strip("<>")
@@ -130,6 +141,11 @@ class MhtmlConverter(DocumentConverter):
             if content_id:
                 by_cid.setdefault(content_id, resource)
             name = _basename(location) if location else (content_id or "")
+            if export is not None:
+                resources.append(resource)
+                exported[id(resource)] = export.add(
+                    data, content_type, name=name or None
+                )
             assets.append(
                 DocumentAsset(
                     name=name or f"image{len(assets) + 1}",
@@ -137,6 +153,9 @@ class MhtmlConverter(DocumentConverter):
                     data=data,
                 )
             )
+
+        if export is not None:
+            assets = export.assets
 
         if html_part is None:
             # Not multipart (or no HTML inside): treat the body as HTML anyway.
@@ -153,7 +172,12 @@ class MhtmlConverter(DocumentConverter):
         base = (html_part.get("Content-Location") or "").strip()
 
         warnings: List[str] = []
-        if kwargs.get("keep_data_uris", False) and (by_location or by_cid):
+        if export is not None:
+            if exported:
+                html = self._point_at_assets(
+                    html, base, by_location, by_basename, by_cid, exported
+                )
+        elif kwargs.get("keep_data_uris", False) and (by_location or by_cid):
             budget = InlineBudget(ArchiveLimits.from_kwargs(kwargs).max_inline_bytes)
             html = self._inline_images(
                 html, base, by_location, by_basename, by_cid, budget
@@ -183,6 +207,57 @@ class MhtmlConverter(DocumentConverter):
             if value:
                 out[key] = str(value).strip()
         return out
+
+    @staticmethod
+    def _find(
+        src: str,
+        base: str,
+        by_location: Dict[str, _Resource],
+        by_basename: Dict[str, _Resource],
+        by_cid: Dict[str, _Resource],
+    ) -> Optional[_Resource]:
+        """The image part an <img src> refers to, if the archive holds it."""
+        if src.lower().startswith("cid:"):
+            return by_cid.get(unquote(src[4:]).strip("<>"))
+        candidates = [src]
+        if base:
+            try:
+                candidates.append(urljoin(base, src))
+            except ValueError:
+                pass
+        for candidate in candidates:
+            for key in _location_keys(candidate):
+                resource = by_location.get(key)
+                if resource:
+                    return resource
+        return by_basename.get(_basename(src))
+
+    @classmethod
+    def _point_at_assets(
+        cls,
+        html: str,
+        base: str,
+        by_location: Dict[str, _Resource],
+        by_basename: Dict[str, _Resource],
+        by_cid: Dict[str, _Resource],
+        exported: Dict[int, str],
+    ) -> str:
+        soup = BeautifulSoup(html, "html.parser")
+        changed = False
+        for img in soup.find_all("img"):
+            src = str(img.get("src") or "").strip()
+            if not src or src.lower().startswith("data:"):
+                continue
+            resource = cls._find(src, base, by_location, by_basename, by_cid)
+            name = exported.get(id(resource)) if resource is not None else None
+            if name is None:
+                continue
+            img["src"] = name
+            img.attrs.pop("data-src", None)
+            if img.get("alt"):
+                img["alt"] = safe_alt_text(str(img["alt"]))
+            changed = True
+        return str(soup) if changed else html
 
     @staticmethod
     def _inline_images(

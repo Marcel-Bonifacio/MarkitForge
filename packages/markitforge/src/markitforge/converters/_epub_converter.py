@@ -5,6 +5,7 @@
 # Derived from MarkItDown (MIT). MarkitForge changes are Apache-2.0; see NOTICE.
 
 import io
+import mimetypes
 import os
 import posixpath
 import zipfile
@@ -12,12 +13,21 @@ from urllib.parse import unquote
 from defusedxml import minidom
 from xml.dom.minidom import Document
 
-from typing import BinaryIO, Any, Dict, List, Set
+from typing import BinaryIO, Any, Dict, List, Optional, Set
 
 from ._html_converter import HtmlConverter
 from .._base_converter import DocumentConverterResult
+from .._progress import check_cancelled, report_progress
 from .._stream_info import StreamInfo
-from ..converter_utils._archive_limits import check_archive, get_budget, read_member
+from ..converter_utils._archive_limits import (
+    ArchiveBudget,
+    ImageAssets,
+    check_archive,
+    get_budget,
+    read_member,
+    wants_images,
+)
+from ..converter_utils._text_safety import safe_alt_text
 
 ACCEPTED_MIME_TYPE_PREFIXES = [
     "application/epub",
@@ -43,6 +53,10 @@ class EpubConverter(HtmlConverter):
     The archive is checked against the archive resource limits before any
     member is read (``ResourceLimitException`` on a hit). Each spine document
     is converted once, and at most ``MAX_SPINE_ITEMS`` of them (with a warning).
+
+    With ``extract_images`` every distinct image the chapters show (by its
+    bytes) becomes an asset named after its file, and the Markdown refers to
+    it by that name.
     """
 
     def __init__(self):
@@ -105,6 +119,7 @@ class EpubConverter(HtmlConverter):
                 item.getAttribute("id"): item.getAttribute("href")
                 for item in opf_dom.getElementsByTagName("item")
             }
+            export = ImageAssets() if wants_images(kwargs) else None
 
             # Extract spine order (ID refs)
             spine_items = opf_dom.getElementsByTagName("itemref")
@@ -133,12 +148,18 @@ class EpubConverter(HtmlConverter):
 
             # Extract and convert the content
             markdown_content: List[str] = []
-            for file in spine:
+            exported: Dict[str, Optional[str]] = {}
+            for chapter, file in enumerate(spine, start=1):
+                check_cancelled(kwargs)
                 if file in zip_names:
                     data = read_member(z, z.getinfo(file), budget)
                     filename = os.path.basename(file)
                     extension = os.path.splitext(filename)[1].lower()
                     mimetype = MIME_TYPE_MAPPING.get(extension)
+                    if export is not None:
+                        data = self._export_images(
+                            z, file, data, zip_names, budget, export, exported, chapter
+                        )
                     converted_content = self._html_converter.convert(
                         io.BytesIO(data),
                         StreamInfo(
@@ -149,6 +170,7 @@ class EpubConverter(HtmlConverter):
                         **kwargs,
                     )
                     markdown_content.append(converted_content.markdown.strip())
+                report_progress(kwargs, "page", chapter, len(spine))
 
             # Format and add the metadata
             metadata_markdown = []
@@ -163,8 +185,67 @@ class EpubConverter(HtmlConverter):
             return DocumentConverterResult(
                 markdown="\n\n".join(markdown_content),
                 title=metadata["title"],
+                assets=export.assets if export is not None else [],
                 warnings=warnings,
             )
+
+    @staticmethod
+    def _export_images(
+        z: zipfile.ZipFile,
+        chapter_path: str,
+        data: bytes,
+        zip_names: Set[str],
+        budget: ArchiveBudget,
+        export: ImageAssets,
+        exported: Dict[str, Optional[str]],
+        chapter: int,
+    ) -> bytes:
+        """Point the chapter's <img> (and SVG <image>) at exported assets.
+
+        Images are resolved inside the archive only; one that is missing,
+        external or not an image keeps its reference. Returns the rewritten
+        chapter as UTF-8 HTML.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(data, "html.parser")
+        base = posixpath.dirname(chapter_path)
+        changed = False
+        for img in soup.find_all(["img", "image"]):
+            attr = "src"
+            if img.name == "image":
+                attr = next(
+                    (a for a in ("xlink:href", "href") if img.get(a)), "xlink:href"
+                )
+            src = str(img.get(attr) or "").strip()
+            if not src or ":" in src.split("/", 1)[0] or src.startswith("/"):
+                continue  # external, data: or absolute: not package content
+            path = posixpath.normpath(posixpath.join(base, unquote(src.split("#")[0])))
+            if path not in exported:
+                exported[path] = None
+                if path in zip_names:
+                    image = read_member(z, z.getinfo(path), budget)
+                    mime = mimetypes.guess_type(path)[0] or ""
+                    if mime.startswith("image/"):
+                        exported[path] = export.add(
+                            image,
+                            mime,
+                            name=posixpath.basename(path),
+                            page=chapter,
+                            description=str(img.get("alt") or "") or None,
+                        )
+            name = exported[path]
+            if name is None:
+                continue
+            if img.name == "image":
+                # markdownify ignores SVG <image>; show it as a plain <img>.
+                img.replace_with(soup.new_tag("img", attrs={"src": name, "alt": ""}))
+            else:
+                img["src"] = name
+                if img.get("alt"):
+                    img["alt"] = safe_alt_text(str(img["alt"]))
+            changed = True
+        return str(soup).encode("utf-8") if changed else data
 
     def _resolve_manifest_href(
         self, href: str, base_path: str, zip_names: Set[str]

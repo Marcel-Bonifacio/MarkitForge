@@ -24,13 +24,16 @@ from .._base_converter import (
 )
 from .._stream_info import StreamInfo
 from .._exceptions import MissingDependencyException, MISSING_DEPENDENCY_MESSAGE
+from .._progress import check_cancelled, report_progress
 from ..converter_utils._archive_limits import (
     ArchiveLimits,
     CaptionCache,
+    ImageAssets,
     InlineBudget,
     check_archive_stream,
     data_uri_length,
     get_budget,
+    wants_images,
 )
 
 # Try loading optional (but in this case, required) dependencies
@@ -51,7 +54,8 @@ ACCEPTED_FILE_EXTENSIONS = [".pptx"]
 
 
 class _PictureState:
-    """Per-document picture bookkeeping: LLM caption cache and inline budget."""
+    """Per-document picture bookkeeping: LLM caption cache, inline budget and
+    (with ``extract_images``) the exported images."""
 
     def __init__(self, kwargs: Dict[str, Any]):
         limits = ArchiveLimits.from_kwargs(kwargs)
@@ -60,6 +64,11 @@ class _PictureState:
             similar=bool(kwargs.get("dedupe_similar_images", True)),
         )
         self.inline = InlineBudget(limits.max_inline_bytes)
+        self.export: Optional[ImageAssets] = (
+            ImageAssets() if wants_images(kwargs) else None
+        )
+        #: 1-based number of the slide being converted, if known.
+        self.slide: Optional[int] = None
 
     @property
     def warnings(self) -> List[str]:
@@ -74,7 +83,9 @@ class PptxConverter(DocumentConverter):
     opened (``ResourceLimitException`` on a hit). Identical images are
     captioned once and at most ``max_llm_calls`` captions are requested per
     presentation; with ``keep_data_uris`` at most ``max_inline_bytes`` of data
-    URIs are inlined, later pictures are referenced by name.
+    URIs are inlined, later pictures are referenced by name. With
+    ``extract_images`` every distinct picture becomes an asset
+    (``slide3_img2.jpeg``) referenced by that name.
     """
 
     def __init__(self):
@@ -128,8 +139,11 @@ class PptxConverter(DocumentConverter):
         chunks: List[str] = []
         sections: List[DocumentSection] = []
         slide_num = 0
+        slide_total = len(presentation.slides)
         for slide in presentation.slides:
+            check_cancelled(kwargs)
             slide_num += 1
+            pictures.slide = slide_num
 
             # Upstream's "Slide number" comment is the default; with
             # page_markers on, the shared "<!-- slide N -->" form is used.
@@ -216,6 +230,7 @@ class PptxConverter(DocumentConverter):
                     kind="slide",
                 )
             )
+            report_progress(kwargs, "slide", slide_num, slide_total)
 
         markdown = "\n\n".join(chunks)
         metadata = self._core_metadata(presentation)
@@ -225,6 +240,7 @@ class PptxConverter(DocumentConverter):
             title=metadata.get("title"),
             metadata=metadata,
             pages=sections,
+            assets=pictures.export.assets if pictures.export is not None else [],
             warnings=pictures.warnings,
         )
 
@@ -348,6 +364,17 @@ class PptxConverter(DocumentConverter):
         # escape the closing bracket, so neither may come from the caption.
         alt_text = re.sub(r"[\r\n\[\]\\]", " ", alt_text)
         alt_text = re.sub(r"\s+", " ", alt_text).strip()
+
+        if _pictures.export is not None and image_blob is not None:
+            slide = _pictures.slide
+            name = _pictures.export.add(
+                image_blob,
+                image_content_type,
+                prefix=f"slide{slide}_img" if slide else "image",
+                page=slide,
+                description=alt_text if alt_text != shape.name else None,
+            )
+            return f"\n![{alt_text}]({name})\n"
 
         if kwargs.get("keep_data_uris", False) and image_blob is not None:
             content_type = image_content_type or "image/png"

@@ -11,9 +11,11 @@ Provides LLM Vision-based image text extraction.
 
 import base64
 import hashlib
+import html
 import inspect
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Optional
 from dataclasses import dataclass
+from warnings import warn
 
 from markitforge import StreamInfo
 
@@ -167,3 +169,49 @@ class OCRCache:
             result = _extract_text_with_metadata(ocr_service, image_stream, stream_info)
         self._results[key] = result
         return result
+
+
+class _FragmentCache:
+    """OCR HTML fragments of one DOCX/PPTX/XLSX conversion, by image content.
+
+    The ``_image_to_html`` hooks of the Office converters share this: the
+    service is asked once per distinct image (SHA-256 of its bytes), and a
+    repeat gets the first answer. A failure is warned about once and
+    remembered as "keep the native image" (``None``).
+    """
+
+    def __init__(self) -> None:
+        self._fragments: dict[bytes, Optional[str]] = {}
+
+    def __len__(self) -> int:
+        return len(self._fragments)
+
+    def fragment(
+        self,
+        ocr_service: Any,
+        image_stream: BinaryIO,
+        stream_info: StreamInfo,
+        label: str,
+    ) -> Optional[str]:
+        image_stream.seek(0)
+        key = hashlib.sha256(image_stream.read()).digest()
+        image_stream.seek(0)
+        if key in self._fragments:
+            return self._fragments[key]
+        self._fragments[key] = None
+        result = _extract_text_with_metadata(ocr_service, image_stream, stream_info)
+        if result.error:
+            warn(
+                f"{label} image OCR failed: {result.error}. Keeping the native image.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            return None
+        text = result.text.strip()
+        if not text:
+            return None
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        content = html.escape(text).replace("\n", "<br>")
+        fragment = f"<p><em>[Image OCR]<br>{content}<br>[End OCR]</em></p>"
+        self._fragments[key] = fragment
+        return fragment

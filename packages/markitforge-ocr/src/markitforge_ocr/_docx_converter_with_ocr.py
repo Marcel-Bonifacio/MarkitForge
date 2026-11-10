@@ -1,14 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) Microsoft Corporation (MarkItDown)
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+#
+# SPDX-License-Identifier: MIT AND Apache-2.0
+# Derived from MarkItDown (MIT). MarkitForge changes are Apache-2.0; see NOTICE.
+
 """DOCX image OCR using the core document conversion pipeline."""
 
-import hashlib
-import html
 from typing import Any, BinaryIO, Optional
-from warnings import warn
 
 from markitforge import DocumentConverterResult, StreamInfo
 from markitforge.converters import DocxConverter
 
-from ._ocr_service import LLMVisionOCRService, _extract_text_with_metadata
+from ._ocr_service import LLMVisionOCRService, _FragmentCache
 
 
 class DocxConverterWithOCR(DocxConverter):
@@ -31,7 +34,7 @@ class DocxConverterWithOCR(DocxConverter):
         **kwargs: Any,
     ) -> DocumentConverterResult:
         # Keep repeated-image recognition local to this document, not the instance.
-        kwargs["_docx_ocr_cache"] = {}
+        kwargs["_docx_ocr_cache"] = _FragmentCache()
         return super().convert(file_stream, stream_info, **kwargs)
 
     def _image_to_html(
@@ -44,28 +47,9 @@ class DocxConverterWithOCR(DocxConverter):
         if ocr_service is None:
             return None
 
-        cache: dict[bytes, Optional[str]] = kwargs.get("_docx_ocr_cache", {})
-        key = hashlib.sha256(image_stream.read()).digest()
-        image_stream.seek(0)
-        if key in cache:
-            return cache[key]
-
-        result = _extract_text_with_metadata(ocr_service, image_stream, stream_info)
-        if result.error:
-            warn(
-                f"DOCX image OCR failed: {result.error}. Keeping the native image.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            cache[key] = None
-            return None
-        text = result.text.strip()
-        if not text:
-            cache[key] = None
-            return None
-
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        content = html.escape(text).replace("\n", "<br>")
-        fragment = f"<p><em>[Image OCR]<br>{content}<br>[End OCR]</em></p>"
-        cache[key] = fragment
-        return fragment
+        # One OCR call per distinct image (by its bytes) in this document;
+        # a repeated image reuses the first result, a failed one included.
+        cache: Optional[_FragmentCache] = kwargs.get("_docx_ocr_cache")
+        if cache is None:
+            cache = _FragmentCache()
+        return cache.fragment(ocr_service, image_stream, stream_info, "DOCX")
