@@ -1,8 +1,19 @@
 {
   "docx_merged_cells/default": 1.0,
+  "pdf_borderless_table/default": 1.0,
+  "pdf_borderless_table/pdfminer": 0.5,
+  "pdf_headers_footers/default": 1.0,
+  "pdf_headers_footers/pdfminer": 0.833,
+  "pdf_mixed_layout/default": 1.0,
+  "pdf_mixed_layout/pdfminer": 0.75,
+  "pdf_multipage_table/default": 1.0,
+  "pdf_multipage_table/pdfminer": 0.5,
+  "pdf_reflow/default": 1.0,
+  "pdf_reflow/pdfminer": 0.667,
   "pdf_report/default": 1.0,
   "pdf_report/pdfminer": 0.6,
   "pdf_two_column/default": 1.0,
   "pdf_two_column/pdfminer": 0.75,
-  "xlsx_blanks_hidden/default": 1.0
+  "xlsx_blanks_hidden/default": 1.0,
+  "xlsx_offset_header/default": 1.0
 }

@@ -7,7 +7,7 @@
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, BinaryIO, Dict, Mapping, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,86 @@ def build_metadata(
     if page_count is not None:
         meta["page_count"] = page_count
     return meta
+
+
+# Bookmarks beyond this many are ignored.
+MAX_OUTLINE_ENTRIES = 5000
+
+
+def _dest_page(doc: Any, dest: Any, action: Any, page_ids: Mapping[int, int]) -> Any:
+    """1-based page number a bookmark points to, or None."""
+    from pdfminer.pdftypes import PDFObjRef, resolve1
+    from pdfminer.psparser import PSLiteral
+
+    target = resolve1(dest)
+    if target is None and action is not None:
+        act = resolve1(action)
+        if isinstance(act, dict):
+            target = resolve1(act.get("D"))
+    for _ in range(3):  # named destination -> dictionary -> array
+        if isinstance(target, PSLiteral):
+            target = target.name
+        if isinstance(target, (str, bytes)):
+            target = resolve1(doc.get_dest(target))
+        elif isinstance(target, dict):
+            target = resolve1(target.get("D"))
+        else:
+            break
+    if not isinstance(target, (list, tuple)) or not target:
+        return None
+    ref = target[0]
+    if isinstance(ref, PDFObjRef):
+        return page_ids.get(ref.objid)
+    if isinstance(ref, int) and not isinstance(ref, bool):
+        return ref + 1  # remote-style destinations count pages from zero
+    return None
+
+
+def read_outline(doc: Any, page_ids: Mapping[int, int]) -> List[Tuple[int, str, Any]]:
+    """Bookmarks of a pdfminer document as (level, title, page or None).
+
+    ``page_ids`` maps page object ids to 1-based page numbers; level 1 is
+    the top of the outline. The tree is walked iteratively and every node is
+    visited once, so cyclic or very long outlines cannot hang or overflow
+    the stack. Documents without (or with broken) outlines give an empty
+    list.
+    """
+    from pdfminer.pdftypes import PDFObjRef, resolve1
+
+    entries: List[Tuple[int, str, Any]] = []
+    try:
+        root = resolve1(doc.catalog.get("Outlines"))
+        if not isinstance(root, dict):
+            return []
+        seen = set()
+        stack: List[Tuple[Any, int]] = [(root.get("First"), 1)]
+        while stack and len(entries) < MAX_OUTLINE_ENTRIES:
+            ref, level = stack.pop()
+            if isinstance(ref, PDFObjRef):
+                if ref.objid in seen:
+                    continue
+                seen.add(ref.objid)
+            node = resolve1(ref)
+            if not isinstance(node, dict):
+                continue
+            if len(seen) > 4 * MAX_OUTLINE_ENTRIES:
+                break
+            # Siblings after children: the stack pops children first.
+            if "Next" in node:
+                stack.append((node["Next"], level))
+            if "First" in node:
+                stack.append((node["First"], level + 1))
+            text = _to_text(node.get("Title")) if "Title" in node else None
+            if not text:
+                continue
+            try:
+                page = _dest_page(doc, node.get("Dest"), node.get("A"), page_ids)
+            except Exception:  # a bad destination only loses the page hint
+                page = None
+            entries.append((level, text, page))
+    except Exception as exc:  # malformed outline trees
+        logger.debug("No usable PDF outline: %s", exc)
+    return entries
 
 
 def read_metadata(pdf_file: BinaryIO) -> Tuple[Dict[str, Any], Optional[int]]:

@@ -55,7 +55,10 @@ class _PictureState:
 
     def __init__(self, kwargs: Dict[str, Any]):
         limits = ArchiveLimits.from_kwargs(kwargs)
-        self.captions = CaptionCache(limits.max_llm_calls)
+        self.captions = CaptionCache(
+            limits.max_llm_calls,
+            similar=bool(kwargs.get("dedupe_similar_images", False)),
+        )
         self.inline = InlineBudget(limits.max_inline_bytes)
 
     @property

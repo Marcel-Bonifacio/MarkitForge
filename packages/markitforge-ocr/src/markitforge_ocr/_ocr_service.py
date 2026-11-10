@@ -1,9 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) Microsoft Corporation (MarkItDown)
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+#
+# SPDX-License-Identifier: MIT AND Apache-2.0
+# Derived from MarkItDown (MIT). MarkitForge changes are Apache-2.0; see NOTICE.
+
 """
 OCR Service Layer for MarkitForge
 Provides LLM Vision-based image text extraction.
 """
 
 import base64
+import hashlib
 import inspect
 from typing import Any, BinaryIO
 from dataclasses import dataclass
@@ -125,3 +132,38 @@ def _extract_text_with_metadata(
         return extract_text(image_stream)
     # Keep service errors outside the signature check; never retry an OCR call.
     return extract_text(image_stream, stream_info=stream_info)
+
+
+class OCRCache:
+    """OCR results of one conversion, keyed by the SHA-256 of the image bytes.
+
+    An image that occurs several times in a document is sent to the service
+    once; later occurrences get the first result, including a failed one, so
+    a failing image is not retried. Use a new cache for every conversion.
+    """
+
+    def __init__(self) -> None:
+        self._results: dict[bytes, OCRResult] = {}
+
+    def extract_text(
+        self,
+        ocr_service: LLMVisionOCRService,
+        image_stream: BinaryIO,
+        stream_info: StreamInfo | None = None,
+    ) -> OCRResult:
+        """The service's result for this image, asking it at most once.
+
+        Without ``stream_info`` the service gets the stream alone.
+        """
+        image_stream.seek(0)
+        key = hashlib.sha256(image_stream.read()).digest()
+        image_stream.seek(0)
+        cached = self._results.get(key)
+        if cached is not None:
+            return cached
+        if stream_info is None:
+            result = ocr_service.extract_text(image_stream)
+        else:
+            result = _extract_text_with_metadata(ocr_service, image_stream, stream_info)
+        self._results[key] = result
+        return result

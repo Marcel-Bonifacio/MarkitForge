@@ -14,10 +14,17 @@ tokens.
 The token is only ever glued onto an existing, non-empty ``w:t`` (never a new
 run or paragraph), so removing it restores exactly the Markdown that the
 document would have produced without it.
+
+Those stored breaks are only as good as the last layout Word saved (and are
+missing from files other tools wrote). :func:`libreoffice_page_count` asks
+LibreOffice to lay the document out instead and reports how many pages that
+gives.
 """
 
 import re
-from typing import Any, List
+import tempfile
+from pathlib import Path
+from typing import Any, List, Mapping, Optional, Tuple
 from uuid import uuid4
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -182,3 +189,85 @@ def split_pages(markdown: str, sentinel: str) -> List[str]:
     while len(texts) > 1 and not texts[-1]:
         texts.pop()
     return texts
+
+
+# ------------------------------------------------------ rendered page count
+
+#: Accepted values of the ``docx_page_count`` option (besides ``None``).
+PAGE_COUNT_MODES = ("libreoffice",)
+
+_DOCX_FILTER = "MS Word 2007 XML"
+_PDF_TARGET = "pdf:writer_pdf_Export"
+_PDF_PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
+
+
+def count_pdf_pages(path: Path) -> Optional[int]:
+    """Number of pages of a PDF file, or ``None`` if it cannot be told."""
+    try:
+        from pdfminer.pdfdocument import PDFDocument
+        from pdfminer.pdfparser import PDFParser
+        from pdfminer.pdftypes import resolve1
+
+        with open(path, "rb") as stream:
+            document = PDFDocument(PDFParser(stream))
+            count = resolve1(resolve1(document.catalog["Pages"])["Count"])
+        if isinstance(count, int) and count > 0:
+            return count
+    except Exception:
+        pass
+    try:
+        count = len(_PDF_PAGE_OBJECT.findall(path.read_bytes()))
+    except OSError:
+        return None
+    return count or None
+
+
+def libreoffice_page_count(
+    data: bytes, options: Mapping[str, Any]
+) -> Tuple[Optional[int], str]:
+    """Lay a DOCX out with LibreOffice and count the pages.
+
+    The document is exported to PDF by the same isolated ``soffice`` run the
+    LibreOffice converter uses (private profile, no network, the
+    ``libreoffice_timeout`` option). Returns ``(pages, "")``, or ``(None,
+    reason)`` when LibreOffice is missing or the export failed. The count is
+    LibreOffice's layout, which can differ from Word's by a page when fonts
+    are substituted.
+    """
+    # Imported here: the LibreOffice converter itself imports the DOCX one.
+    from ..._exceptions import FileConversionException
+    from ...converters import _libreoffice_converter as lo
+
+    soffice = lo.find_soffice()
+    if not soffice:
+        return None, "LibreOffice (soffice) was not found"
+    timeout = lo._timeout(dict(options))
+    with tempfile.TemporaryDirectory(prefix="markitforge-lo-pages-") as tmp:
+        tmp_path = Path(tmp)
+        source = tmp_path / "input.docx"
+        source.write_bytes(data)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        output = out_dir / "input.pdf"
+        args = lo._soffice_args(
+            tmp_path / "profile", _DOCX_FILTER, _PDF_TARGET, out_dir, source
+        )
+        sandbox = (
+            [] if lo._SANDBOX_WORKS.get(soffice) is False else lo._sandbox_prefix()
+        )
+        try:
+            lo._run(sandbox + [soffice] + args, tmp, timeout, ".docx")
+            if sandbox and output.is_file():
+                lo._SANDBOX_WORKS[soffice] = True
+            elif sandbox and lo._sandbox_breaks(soffice, sandbox):
+                lo._run([soffice] + args, tmp, timeout, ".docx")
+        except FileConversionException as exc:
+            return None, str(exc)
+        except OSError as exc:
+            return None, f"LibreOffice could not be run ({exc})"
+        if not output.is_file():
+            return None, "LibreOffice could not export the document to PDF"
+        pages = count_pdf_pages(output)
+    if pages is None:
+        return None, "the PDF LibreOffice exported could not be read"
+    return pages, ""

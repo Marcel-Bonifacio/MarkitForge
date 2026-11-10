@@ -208,10 +208,10 @@ def test_xlsx_multiple_images(svc: MockOCRService) -> None:
 def test_xlsx_complex_layout(svc: MockOCRService) -> None:
     expected = (
         "## Complex Report\n"
-        "| Annual Report 2024 | Unnamed: 1 |\n"
-        "| --- | --- |\n"
-        "|  |  |\n"
+        "**Annual Report 2024**\n"
+        "\n"
         "| Month | Sales |\n"
+        "| --- | --- |\n"
         "| Jan | 1000 |\n"
         "| Feb | 1200 |\n"
         "|  |  |\n"

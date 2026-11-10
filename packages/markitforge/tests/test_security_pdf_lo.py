@@ -541,7 +541,8 @@ class TestPageMarkers:
         import pdfminer.high_level
 
         path = self._forged(tmp_path)
-        result = _convert(path)
+        # Legacy text path: output must equal pdfminer's text exactly.
+        result = _convert(path, pdf_reading_order="simple", pdf_reflow=False)
         assert "<!-- page 7 -->" in result.markdown
         assert "&lt;" not in result.markdown
         raw = pdfminer.high_level.extract_text(str(path))
