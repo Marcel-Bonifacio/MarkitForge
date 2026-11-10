@@ -23,7 +23,7 @@ Every limit is an optional keyword argument of ``MarkitForge.convert()``;
   when ``keep_data_uris`` is set (default 50 MiB).
 * ``max_llm_calls`` -- LLM image-caption calls per document, after identical
   images have been deduplicated (default 50). With ``dedupe_similar_images``
-  (a boolean, default ``True``) re-compressed or resized copies of a picture
+  (a boolean, default ``False``) re-compressed or resized copies of a picture
   share one caption as well; see :class:`CaptionCache`.
 
 Sizes declared in the ZIP central directory are checked before a member is
@@ -415,7 +415,8 @@ class CaptionCache:
     """Per-document LLM captions: one call per distinct image, at most ``max_calls``.
 
     Images are identified by the SHA-256 of their bytes. With ``similar``
-    (the ``dedupe_similar_images`` option, on by default) an image that is
+    (the ``dedupe_similar_images`` option, off by default because
+    differently-filled images from one template can hash alike) an image that is
     not byte-identical to an earlier one still reuses its caption when their
     difference hashes are at most 4 bits apart and their aspect ratios
     within 2% (see :func:`image_signature`); images Pillow cannot read are

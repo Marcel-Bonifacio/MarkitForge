@@ -1223,8 +1223,10 @@ class TestTablesInPipeline:
             f"Part {i:02d}" for i in range(1, 61)
         ]
         _in_order(md, "The parts list starts", "| Item", "| Part 60", "Weights were")
-        assert "| Part 60" in result.pages[0].markdown
-        assert "| Part" not in result.pages[1].markdown
+        # Only the joined text is merged; each page keeps its own rows.
+        assert "| Part 01" in result.pages[0].markdown
+        assert "| Part 60" in result.pages[1].markdown
+        assert "| Part 60" not in result.pages[0].markdown
         assert "Weights were measured" in result.pages[1].markdown
 
     def test_merge_can_be_turned_off(self):
@@ -1232,10 +1234,13 @@ class TestTablesInPipeline:
         assert result.markdown.count("| Item") == 2
         assert "| Part 60" in result.pages[1].markdown
 
-    def test_merged_table_with_page_markers(self):
+    def test_page_markers_keep_pages_apart(self):
+        # With page markers the page boundary stays visible, so each page
+        # shows its own part of the table, header included.
         md = _convert(LONG_TABLE, page_markers=True).markdown
-        assert md.count("| Item") == 1
+        assert md.count("| Item") == 2
         assert "<!-- page 2 -->" in md
+        _in_order(md, "| Part 01", "<!-- page 2 -->", "| Part 60")
 
 
 class TestMathInPipeline:

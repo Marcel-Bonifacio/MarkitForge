@@ -57,7 +57,7 @@ class _PictureState:
         limits = ArchiveLimits.from_kwargs(kwargs)
         self.captions = CaptionCache(
             limits.max_llm_calls,
-            similar=bool(kwargs.get("dedupe_similar_images", True)),
+            similar=bool(kwargs.get("dedupe_similar_images", False)),
         )
         self.inline = InlineBudget(limits.max_inline_bytes)
 

@@ -287,12 +287,13 @@ def test_docx_similar_images_are_captioned_once(tmp_path: Path) -> None:
         )
         return client.calls, result
 
-    calls, result = convert()
+    calls, result = convert(dedupe_similar_images=True)
     assert calls == 2
     assert result.markdown.count("![a caption]") == 4 and result.warnings == []
-    assert convert(dedupe_similar_images=False)[0] == 4
+    # Off by default: look-alike images are captioned separately.
+    assert convert()[0] == 4
     # Copies of a captioned picture stay captioned after the cap is reached.
-    calls, result = convert(max_llm_calls=1)
+    calls, result = convert(max_llm_calls=1, dedupe_similar_images=True)
     assert calls == 1 and result.markdown.count("![a caption]") == 3
 
 

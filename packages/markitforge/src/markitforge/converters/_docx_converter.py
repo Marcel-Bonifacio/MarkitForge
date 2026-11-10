@@ -131,7 +131,7 @@ class _DocxImageHandler:
         self._inline = InlineBudget(limits.max_inline_bytes)
         self._captions = CaptionCache(
             limits.max_llm_calls,
-            similar=bool(options.get("dedupe_similar_images", True)),
+            similar=bool(options.get("dedupe_similar_images", False)),
         )
         self.assets: List[DocumentAsset] = []
         self._warnings: List[str] = []
