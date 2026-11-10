@@ -5,8 +5,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="mf-token" content="">
   <title>MarkitForge</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <!-- Sets data-theme before the stylesheet loads (no flash, no inline script). -->
+  <script src="/static/theme.js"></script>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/app.js" defer></script>
 </head>
@@ -25,10 +28,24 @@
         Open .md file
       </button>
       <input type="file" id="open-md-input" accept=".md,.markdown,.mdown,.mkd,.txt,text/markdown,text/plain" hidden>
-      <a id="zip-btn" class="btn ghost" href="/api/zip" aria-disabled="true" tabindex="-1">
+      <a id="zip-btn" class="btn ghost" href="#" aria-disabled="true" tabindex="-1">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></svg>
         Download all (.zip)
       </a>
+      <div class="theme-switch" id="theme-switch" role="radiogroup" aria-label="Color theme">
+        <button type="button" role="radio" data-theme-choice="system" aria-checked="true" title="Follow the system setting">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h16v11H4zM9 20h6M12 16v4"/></svg>
+          <span class="theme-label">System</span>
+        </button>
+        <button type="button" role="radio" data-theme-choice="light" aria-checked="false" tabindex="-1" title="Light">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          <span class="theme-label">Light</span>
+        </button>
+        <button type="button" role="radio" data-theme-choice="dark" aria-checked="false" tabindex="-1" title="Dark">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
+          <span class="theme-label">Dark</span>
+        </button>
+      </div>
     </div>
   </header>
 
@@ -41,8 +58,13 @@
         </svg>
         <h2 id="dz-title" class="dz-title">Drop files here</h2>
         <p class="dz-help" id="dz-help">PDF, Word, PowerPoint, Excel, web pages, CSV, EPUB, images, audio and more. Up to <span id="limit-mb">200</span>&nbsp;MB each.</p>
-        <button type="button" id="choose-btn" class="btn primary" aria-describedby="dz-help">Choose files</button>
+        <div class="dz-buttons">
+          <button type="button" id="choose-btn" class="btn primary" aria-describedby="dz-help">Choose files</button>
+          <button type="button" id="folder-btn" class="btn" aria-describedby="dz-folder-help">Choose folder</button>
+        </div>
+        <p class="dz-help" id="dz-folder-help">A folder is converted file by file (up to <span id="folder-limit">500</span> files, hidden files skipped).</p>
         <input type="file" id="file-input" multiple hidden>
+        <input type="file" id="folder-input" webkitdirectory multiple hidden>
       </section>
 
       <form id="url-form" class="url-form" novalidate>
@@ -98,10 +120,66 @@
         <p class="help options-note">Options apply to the next files you convert.</p>
       </details>
 
+      <details class="options" id="ai-options">
+        <summary>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
+          AI options
+        </summary>
+        <p class="help ai-note" id="ai-privacy" role="note"></p>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-ocr"> Read scanned pages (OCR)</label>
+          <p class="help">Turns pages that are only a picture of text into text.</p>
+          <label class="label sub-label" for="opt-ocr-engine">Read them with</label>
+          <select id="opt-ocr-engine">
+            <option value="auto">Automatic</option>
+            <option value="tesseract">Tesseract (on this computer)</option>
+            <option value="llm">The AI model below</option>
+          </select>
+        </div>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-describe-images"> Describe images</label>
+          <p class="help">Adds a short description of each picture.</p>
+        </div>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-formulas"> Turn formulas into LaTeX</label>
+          <p class="help">Math in PDFs becomes LaTeX you can edit.</p>
+        </div>
+        <div class="option">
+          <label class="check"><input type="checkbox" id="opt-extract-images"> Save images</label>
+          <p class="help">Keeps the pictures as files. The .zip download puts them next to the .md file. Does not use AI.</p>
+        </div>
+        <fieldset class="option provider">
+          <legend class="label">AI provider</legend>
+          <label class="check"><input type="radio" name="llm-provider" id="llm-local" value="local"> Local (Ollama)</label>
+          <label class="check"><input type="radio" name="llm-provider" id="llm-openai" value="openai"> OpenAI-compatible service</label>
+          <label class="label sub-label" for="llm-base-url">Address</label>
+          <input type="url" id="llm-base-url" spellcheck="false" autocomplete="off" placeholder="http://localhost:11434/v1">
+          <label class="label sub-label" for="llm-model">Model</label>
+          <input type="text" id="llm-model" spellcheck="false" autocomplete="off" list="llm-models" placeholder="llama3.2-vision">
+          <datalist id="llm-models"></datalist>
+          <div id="llm-key-row" hidden>
+            <label class="label sub-label" for="llm-key">API key</label>
+            <input type="password" id="llm-key" spellcheck="false" autocomplete="off" aria-describedby="llm-key-help">
+            <p class="help" id="llm-key-help">Kept in memory only while MarkitForge runs. Never saved to disk.</p>
+            <p class="key-state" id="llm-key-state"></p>
+            <button type="button" id="llm-forget-key" class="btn small" hidden>Forget key</button>
+          </div>
+          <p class="help" id="llm-install" hidden>The AI options need the <code>openai</code> package: <code>pip install openai</code></p>
+          <div class="ai-buttons">
+            <button type="button" id="llm-save" class="btn small">Save settings</button>
+            <button type="button" id="llm-test" class="btn small">Test connection</button>
+          </div>
+          <p class="help" id="llm-status" role="status"></p>
+        </fieldset>
+      </details>
+
       <section class="files" aria-labelledby="files-title">
         <div class="files-head">
           <h2 id="files-title">Your files</h2>
-          <button type="button" id="clear-btn" class="btn small ghost" hidden>Clear list</button>
+          <div class="files-actions">
+            <button type="button" id="clear-btn" class="btn small ghost" hidden>Clear list</button>
+            <button type="button" id="clear-history-btn" class="btn small ghost" hidden>Clear history</button>
+          </div>
         </div>
         <ul id="file-list" class="file-list"></ul>
         <p id="files-empty" class="muted small-text">Converted files will show up here.</p>
@@ -117,13 +195,16 @@
             <li><strong>Look at the result</strong>: a nicely formatted preview, the raw Markdown, and document details.</li>
             <li><strong>Save it</strong> with <em>Download .md</em>, or copy it to paste somewhere else.</li>
           </ol>
-          <p class="muted">Everything happens on this computer. Your files are not uploaded to the internet.</p>
+          <p class="muted">Everything happens on this computer. Your files are not uploaded to the internet, unless you turn on an AI option that uses an online service.</p>
         </div>
       </div>
 
       <div id="viewer-status" class="viewer-status" hidden>
         <div class="spinner" aria-hidden="true"></div>
         <p id="viewer-status-text">Converting…</p>
+        <progress id="job-progress" class="job-progress" max="100" aria-labelledby="viewer-status-text"></progress>
+        <p id="job-progress-text" class="muted small-text"></p>
+        <button type="button" id="cancel-btn" class="btn">Cancel</button>
       </div>
 
       <div id="viewer-error" class="viewer-error" hidden>
@@ -143,6 +224,10 @@
             <p id="doc-sub" class="muted"></p>
           </div>
           <div class="actions">
+            <button type="button" id="split-btn" class="btn split-toggle" aria-pressed="false">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h16v14H4zM12 5v14"/></svg>
+              Side by side
+            </button>
             <button type="button" id="copy-btn" class="btn">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 9h10v11H9zM5 15V4h10"/></svg>
               Copy
@@ -161,20 +246,28 @@
 
         <div class="tabs" role="tablist" aria-label="How to show the result">
           <button type="button" role="tab" id="tab-preview" aria-controls="panel-preview" aria-selected="true">Preview</button>
-          <button type="button" role="tab" id="tab-markdown" aria-controls="panel-markdown" aria-selected="false" tabindex="-1">Markdown</button>
+          <button type="button" role="tab" id="tab-markdown" aria-controls="panel-markdown" aria-selected="false" tabindex="-1">Markdown <span id="edited-badge" class="badge neutral" hidden>edited</span></button>
+          <button type="button" role="tab" id="tab-original" aria-controls="panel-original" aria-selected="false" tabindex="-1">Original</button>
           <button type="button" role="tab" id="tab-details" aria-controls="panel-details" aria-selected="false" tabindex="-1">
             Details <span id="warn-badge" class="badge" hidden></span>
           </button>
         </div>
 
-        <div class="panels">
+        <div class="panels" id="panels">
+          <div role="tabpanel" id="panel-original" aria-labelledby="tab-original" tabindex="0" hidden>
+            <div id="original-view" class="original-view"></div>
+          </div>
           <div role="tabpanel" id="panel-preview" aria-labelledby="tab-preview" tabindex="0">
             <article id="preview" class="prose"></article>
           </div>
-          <div role="tabpanel" id="panel-markdown" aria-labelledby="tab-markdown" tabindex="0" hidden>
+          <div role="tabpanel" id="panel-markdown" aria-labelledby="tab-markdown" hidden>
+            <div class="editor-bar">
+              <p id="editor-note" class="help">You can edit the Markdown here. Copy and Download use your edited text.</p>
+              <p id="save-state" class="save-state" role="status"></p>
+            </div>
             <div class="code">
               <pre id="gutter" class="gutter" aria-hidden="true"></pre>
-              <pre id="source" class="source" aria-label="Markdown source"></pre>
+              <textarea id="source" class="source" wrap="off" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Markdown source (editable)" aria-describedby="editor-note"></textarea>
             </div>
           </div>
           <div role="tabpanel" id="panel-details" aria-labelledby="tab-details" tabindex="0" hidden>
@@ -195,6 +288,7 @@
                   <p id="range-help" class="help">Preview, Markdown, Copy and Download then use just those pages.</p>
                   <p id="range-error" class="field-error" role="alert" hidden></p>
                 </form>
+                <p id="range-edited" class="help" hidden>Page selection is off because the Markdown was edited.</p>
                 <ul id="pages-list" class="pages-list"></ul>
               </section>
 
@@ -223,6 +317,16 @@
   <div id="drop-overlay" class="drop-overlay" hidden aria-hidden="true">
     <div class="drop-overlay-inner">Drop to convert</div>
   </div>
+  <dialog id="confirm-dialog" class="dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <form method="dialog">
+      <h2 id="confirm-title">Clear the history?</h2>
+      <p id="confirm-text">This deletes every saved result from this computer. Files that are still converting are not affected. This cannot be undone.</p>
+      <div class="dialog-buttons">
+        <button type="submit" value="cancel" class="btn" autofocus>Cancel</button>
+        <button type="submit" value="confirm" class="btn danger">Clear history</button>
+      </div>
+    </form>
+  </dialog>
   <div id="live" class="visually-hidden" aria-live="polite"></div>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>

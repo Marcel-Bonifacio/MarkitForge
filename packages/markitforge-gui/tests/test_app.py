@@ -22,33 +22,13 @@ from markitforge_gui._app import (
     OptionsError,
 )
 
-TEST_FILES = (
-    Path(__file__).resolve().parents[2] / "markitforge" / "tests" / "test_files"
-)
-HEADERS = {CLIENT_HEADER: "1"}
+from .helpers import HEADERS, TC, upload, wait_job
 
 
 @pytest.fixture()
 def client() -> Iterator[TestClient]:
-    with TestClient(create_app(), base_url="http://127.0.0.1:8765") as c:
+    with TC(create_app(), base_url="http://127.0.0.1:8765") as c:
         yield c
-
-
-def upload(
-    client: TestClient,
-    name: str,
-    data: Optional[bytes] = None,
-    options: Optional[Dict[str, Any]] = None,
-    headers: Optional[Dict[str, str]] = None,
-) -> Any:
-    if data is None:
-        data = (TEST_FILES / name).read_bytes()
-    return client.post(
-        "/api/convert",
-        files={"file": (name, data, "application/octet-stream")},
-        data={"options": json.dumps(options or {})},
-        headers=HEADERS if headers is None else headers,
-    )
 
 
 # ---------------------------------------------------------------- pages
@@ -74,7 +54,7 @@ def test_info(client: TestClient) -> None:
 
 
 def test_foreign_host_rejected() -> None:
-    with TestClient(create_app(), base_url="http://evil.example:8765") as c:
+    with TC(create_app(), base_url="http://evil.example:8765") as c:
         assert c.get("/").status_code == 400
 
 
@@ -156,7 +136,7 @@ def test_bad_options_rejected(client: TestClient) -> None:
 
 def test_upload_limit_enforced() -> None:
     app = create_app(max_upload_mb=0.01)  # ~10 KB (+1 MB framing allowance)
-    with TestClient(app, base_url="http://127.0.0.1") as c:
+    with TC(app, base_url="http://127.0.0.1") as c:
         big = b"a" * (2 * 1024 * 1024)
         res = upload(c, "big.txt", data=big)
         assert res.status_code == 413
@@ -165,7 +145,7 @@ def test_upload_limit_enforced() -> None:
 
 def test_upload_limit_enforced_without_content_length() -> None:
     app = create_app(max_upload_mb=0.01)
-    with TestClient(app, base_url="http://127.0.0.1") as c:
+    with TC(app, base_url="http://127.0.0.1") as c:
 
         def chunks() -> Iterator[bytes]:
             for _ in range(40):
@@ -187,7 +167,7 @@ def test_missing_dependency_shows_hint(client: TestClient) -> None:
             raise MissingDependencyException("pip install 'markitforge[pdf]'")
 
     app = create_app(converter_factory=Broken)
-    with TestClient(app, base_url="http://127.0.0.1") as c:
+    with TC(app, base_url="http://127.0.0.1") as c:
         res = upload(c, "test.pdf")
     assert res.status_code == 422
     body = res.json()
@@ -326,9 +306,7 @@ def test_converted_html_is_sanitized() -> None:
                 warnings=["Something odd"],
             )
 
-    with TestClient(
-        create_app(converter_factory=Evil), base_url="http://127.0.0.1"
-    ) as c:
+    with TC(create_app(converter_factory=Evil), base_url="http://127.0.0.1") as c:
         data = upload(c, "test.docx").json()
     assert "<script" not in data["html"]
     assert "javascript:" not in data["html"]
@@ -367,7 +345,7 @@ def test_store_is_capped() -> None:
             return DocumentConverterResult(markdown="x")
 
     app = create_app(converter_factory=Tiny, store_capacity=3)
-    with TestClient(app, base_url="http://127.0.0.1") as c:
+    with TC(app, base_url="http://127.0.0.1") as c:
         ids = [upload(c, f"f{i}.txt", data=b"x").json()["id"] for i in range(5)]
         assert c.get(f"/api/download/{ids[0]}").status_code == 404
         assert c.get(f"/api/download/{ids[-1]}").status_code == 200
@@ -384,9 +362,7 @@ def test_download_filename_is_safe() -> None:
         def convert_local(self, *args: Any, **kwargs: Any) -> DocumentConverterResult:
             return DocumentConverterResult(markdown="x")
 
-    with TestClient(
-        create_app(converter_factory=Tiny), base_url="http://127.0.0.1"
-    ) as c:
+    with TC(create_app(converter_factory=Tiny), base_url="http://127.0.0.1") as c:
         data = upload(c, '../../etc/"evil"\r\nX: y.pdf', data=b"x").json()
         md_name = data["md_filename"]
         assert md_name.endswith(".md")
@@ -421,16 +397,20 @@ def test_convert_url_uses_converter() -> None:
             seen["kwargs"] = kwargs
             return DocumentConverterResult(markdown="# Page", title="My Page")
 
-    with TestClient(
-        create_app(converter_factory=Fake), base_url="http://127.0.0.1"
-    ) as c:
-        res = c.post(
-            "/api/convert-url",
-            json={"url": "example.com/a", "options": {"table_format": "html"}},
-            headers=HEADERS,
+    with TC(create_app(converter_factory=Fake), base_url="http://127.0.0.1") as c:
+        res = wait_job(
+            c,
+            c.post(
+                "/api/convert-url",
+                json={"url": "example.com/a", "options": {"table_format": "html"}},
+                headers=HEADERS,
+            ),
         )
     assert res.status_code == 200, res.text
     assert seen["uri"] == "https://example.com/a"
+    # The job adds its progress callback and cancel event.
+    assert callable(seen["kwargs"].pop("progress"))
+    assert hasattr(seen["kwargs"].pop("cancel_event"), "is_set")
     assert seen["kwargs"] == {
         "table_format": "html",
         "max_download_bytes": 200 * 1024 * 1024,
@@ -534,7 +514,7 @@ def test_rebinding_origin_not_on_allow_list_is_refused():
     app = create_app(allowed_hosts=["127.0.0.1", "localhost", "evil.example"])
     # evil.example passes the Host check here only because we put it in the
     # list for the test; the Origin check must still match the list.
-    client = TestClient(app, base_url="http://evil.example")
+    client = TC(app, base_url="http://evil.example")
     r = client.post(
         "/api/render",
         json={"markdown": "x"},
@@ -542,7 +522,7 @@ def test_rebinding_origin_not_on_allow_list_is_refused():
     )
     assert r.status_code == 200  # on the list: allowed
     app2 = create_app()
-    client2 = TestClient(app2, base_url="http://127.0.0.1")
+    client2 = TC(app2, base_url="http://127.0.0.1")
     r2 = client2.post(
         "/api/render",
         json={"markdown": "x"},

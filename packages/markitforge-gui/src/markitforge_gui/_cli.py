@@ -11,17 +11,34 @@ import sys
 import threading
 import time
 import webbrowser
+from pathlib import Path
 from typing import List, Optional, Sequence
 
 import uvicorn
 
 from .__about__ import __version__
 from ._app import DEFAULT_MAX_UPLOAD_MB, LOOPBACK_HOSTS, create_app
+from ._history import DATA_DIR_ENV, default_data_dir
 
 __all__ = ["main", "bind_socket", "build_parser"]
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+
+def _default_data_dir_text() -> str:
+    try:
+        return str(default_data_dir())
+    except RuntimeError:  # no home directory
+        return "your user data folder"
+
+
+def history_dir_for(args: argparse.Namespace) -> Optional[Path]:
+    """Where the history lives, or None with --no-history."""
+    if args.no_history:
+        return None
+    base = Path(args.data_dir).expanduser() if args.data_dir else default_data_dir()
+    return base / "history"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +75,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_MAX_UPLOAD_MB,
         help=f"Largest file you can upload, in MB (default: {DEFAULT_MAX_UPLOAD_MB}).",
+    )
+    parser.add_argument(
+        "--no-history",
+        action="store_true",
+        help="Do not keep results between restarts (by default they are saved "
+        "in your user data folder, see --data-dir).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="Folder for the saved history (default: "
+        f"{_default_data_dir_text()}; or set {DATA_DIR_ENV}).",
+    )
+    parser.add_argument(
+        "--allow-private-urls",
+        action="store_true",
+        help="Allow converting web addresses on this computer or your local "
+        "network (blocked by default).",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -210,14 +245,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.port and port != args.port:
         print(f"Port {args.port} is busy, using port {port} instead.", flush=True)
 
-    app = create_app(
-        max_upload_mb=args.max_upload_mb, allowed_hosts=_allowed_hosts(args.host)
-    )
+    history_dir = history_dir_for(args)
+    try:
+        app = create_app(
+            max_upload_mb=args.max_upload_mb,
+            allowed_hosts=_allowed_hosts(args.host),
+            history_dir=history_dir,
+            allow_private_urls=args.allow_private_urls,
+        )
+    except OSError as exc:
+        print(
+            f"Could not use the history folder {history_dir}: {exc}\n"
+            "Start with --no-history or choose another folder with --data-dir.",
+            file=sys.stderr,
+        )
+        sock.close()
+        return 1
     config = uvicorn.Config(app, log_level="warning", access_log=False)
     server = uvicorn.Server(config)
     url = _display_url(args.host, port)
 
     print(f"MarkitForge is running at {url}", flush=True)
+    if history_dir is not None:
+        print(f"Results are saved in {history_dir} (turn off with --no-history).")
 
     if args.window and _run_window(server, sock, url):
         return 0
