@@ -32,7 +32,7 @@ from ._net import check_public_url
 try:  # Magika is optional: without it, type detection uses extension, mimetype and charset sniffing.
     import magika as _magika_module
 except ImportError:  # pragma: no cover - depends on the install
-    _magika_module = None
+    _magika_module = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +66,13 @@ from .converters import (
     CsvConverter,
     LibreOfficeConverter,
     MhtmlConverter,
+    EmlConverter,
 )
 
 from ._base_converter import DocumentConverter, DocumentConverterResult
 
 from ._exceptions import (
+    ConversionCancelled,
     ResourceLimitException,
     FileConversionException,
     UnsupportedFormatException,
@@ -84,7 +86,9 @@ def _get_content_disposition_filename(content_disposition: str) -> Optional[str]
 
     fallback_filename: Optional[str] = None
     extended_filename: Optional[str] = None
-    for key, value in message.get_params(header="content-disposition", unquote=True):
+    for key, value in (
+        message.get_params(header="content-disposition", unquote=True) or []
+    ):
         if key != "filename":
             continue
         if isinstance(value, tuple):
@@ -307,6 +311,7 @@ class MarkitForge:
             self.register_converter(CsvConverter())
             self.register_converter(LibreOfficeConverter())
             self.register_converter(MhtmlConverter())
+            self.register_converter(EmlConverter(markitforge=self))
 
             # Register Document Intelligence converter at the top of the stack if endpoint is provided
             docintel_endpoint = kwargs.get("docintel_endpoint")
@@ -779,9 +784,9 @@ class MarkitForge:
                 if _accepts:
                     try:
                         res = converter.convert(file_stream, stream_info, **_kwargs)
-                    except ResourceLimitException:
-                        # A safety limit was hit (zip bomb, size, time). Don't
-                        # let the next converter retry the same hostile input.
+                    except (ResourceLimitException, ConversionCancelled):
+                        # A safety limit was hit (zip bomb, size, time) or the
+                        # caller cancelled: don't let the next converter retry.
                         raise
                     except Exception:
                         failed_attempts.append(

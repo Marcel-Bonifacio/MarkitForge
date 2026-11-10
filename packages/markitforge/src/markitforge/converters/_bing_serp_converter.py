@@ -86,7 +86,7 @@ class BingSerpConverter(DocumentConverter):
 
             # Rewrite redirect urls
             for a in result.find_all("a", href=True):
-                parsed_href = urlparse(a["href"])
+                parsed_href = urlparse(str(a["href"]))
                 qs = parse_qs(parsed_href.query)
 
                 # The destination is contained in the u parameter,

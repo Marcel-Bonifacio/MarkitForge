@@ -357,6 +357,10 @@ def test_speech_transcription_uses_https(monkeypatch: pytest.MonkeyPatch) -> Non
     skip_remote,
     reason="do not run remotely run speech transcription tests",
 )
+@pytest.mark.skipif(
+    __import__("shutil").which("ffprobe") is None,
+    reason="speech transcription needs ffmpeg/ffprobe for MP3/M4A decoding",
+)
 def test_speech_transcription() -> None:
     markitforge = MarkitForge()
 

@@ -187,19 +187,21 @@ class YouTubeConverter(DocumentConverter):
                     )
 
                     if transcript:
-                        transcript_text = " ".join([part.text for part in transcript])  # type: ignore
+                        transcript_text = " ".join(
+                            [part.text for part in transcript]  # type: ignore[attr-defined]
+                        )  # type: ignore
                 except Exception as e:
                     # No transcript available
                     if len(languages) == 1:
                         print(f"Error fetching transcript: {e}")
                     else:
                         # Translate transcript into first kwarg
-                        transcript = (
+                        translated: Any = (
                             transcript_list.find_transcript(languages)
                             .translate(youtube_transcript_languages[0])
                             .fetch()
                         )
-                        transcript_text = " ".join([part.text for part in transcript])
+                        transcript_text = " ".join([part.text for part in translated])
             if transcript_text:
                 webpage_text += f"\n### Transcript\n{transcript_text}\n"
 

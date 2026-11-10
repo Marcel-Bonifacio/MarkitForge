@@ -29,25 +29,25 @@ except ImportError:
     _dependency_exc_info = sys.exc_info()
 
     # Define these types for type hinting when the package is not available
-    class AzureKeyCredential:
+    class AzureKeyCredential:  # type: ignore[no-redef]
         pass
 
-    class TokenCredential:
+    class TokenCredential:  # type: ignore[no-redef]
         pass
 
-    class DocumentIntelligenceClient:
+    class DocumentIntelligenceClient:  # type: ignore[no-redef]
         pass
 
-    class AnalyzeDocumentRequest:
+    class AnalyzeDocumentRequest:  # type: ignore[no-redef]
         pass
 
-    class AnalyzeResult:
+    class AnalyzeResult:  # type: ignore[no-redef]
         pass
 
-    class DocumentAnalysisFeature:
+    class DocumentAnalysisFeature:  # type: ignore[no-redef]
         pass
 
-    class DefaultAzureCredential:
+    class DefaultAzureCredential:  # type: ignore[no-redef]
         pass
 
 

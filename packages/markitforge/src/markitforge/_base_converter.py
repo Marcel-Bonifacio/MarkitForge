@@ -162,6 +162,50 @@ class DocumentConverterResult:
                 p.pop("markdown", None)
         return out
 
+    # ---- retrieval / export helpers (see _rag.py) --------------------------
+
+    def front_matter(self, extra: Optional[Dict[str, Any]] = None) -> str:
+        """YAML front matter (title, metadata, page count, warnings)."""
+        from ._rag import front_matter
+
+        return front_matter(self, extra)
+
+    def to_markdown(
+        self, *, front_matter: bool = False, pages: Optional[str] = None
+    ) -> str:
+        """The Markdown, optionally limited to ``pages`` and with front matter."""
+        body = self.select_pages(pages) if pages else self.markdown
+        return (self.front_matter() + "\n" + body) if front_matter else body
+
+    def chunks(
+        self,
+        *,
+        by: str = "heading",
+        max_tokens: int = 800,
+        overlap: int = 0,
+        split_level: int = 3,
+    ) -> List[Any]:
+        """Retrieval chunks with heading path and page range (see _rag.chunk_result)."""
+        from ._rag import chunk_result
+
+        return chunk_result(
+            self, by=by, max_tokens=max_tokens, overlap=overlap, split_level=split_level
+        )
+
+    def save_assets(
+        self, directory: Any, *, link_prefix: Optional[str] = None, rewrite: bool = True
+    ) -> Dict[str, str]:
+        """Write extracted images into ``directory`` and (by default) point the
+        Markdown's image links at them. Returns {asset name: link target}."""
+        from ._rag import rewrite_asset_links, save_assets
+
+        mapping = save_assets(self, directory, link_prefix=link_prefix)
+        if rewrite and mapping:
+            self.markdown = rewrite_asset_links(self.markdown, mapping)
+            for sec in self.pages:
+                sec.markdown = rewrite_asset_links(sec.markdown, mapping)
+        return mapping
+
     def __str__(self) -> str:
         """Return the converted Markdown text."""
         return self.markdown

@@ -16,7 +16,7 @@ from concurrent.futures import (
 )
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 from urllib.parse import urlparse
 
 _WORKER_CONVERTER: Any = None
@@ -97,32 +97,85 @@ def collect_items(
     return items
 
 
-def _render(result: Any, pages: Optional[str], as_json: bool) -> str:
+def render_output(
+    result: Any,
+    opts: Dict[str, Any],
+    *,
+    source: Optional[str] = None,
+    assets_dir: Optional[Path] = None,
+    link_prefix: Optional[str] = None,
+) -> str:
+    """Turn one result into the text to write, honouring the output options.
+
+    opts keys: pages, as_json, front_matter, chunks ({"by", "max_tokens",
+    "overlap"} or None). When ``assets_dir`` is set, extracted images are
+    written there and the Markdown links point at ``link_prefix/<file>``.
+    """
+    if assets_dir is not None and getattr(result, "assets", None):
+        result.save_assets(assets_dir, link_prefix=link_prefix)
+    pages = opts.get("pages")
     markdown = result.markdown
     if pages and result.pages:
         markdown = result.select_pages(pages)
-    if as_json:
+    chunks = opts.get("chunks")
+    if chunks:
+        if pages and result.pages:
+            from ._base_converter import DocumentConverterResult, parse_page_range
+
+            keep = set(parse_page_range(pages, max(sec.index for sec in result.pages)))
+            result = DocumentConverterResult(
+                markdown,
+                title=result.title,
+                metadata=result.metadata,
+                pages=[sec for sec in result.pages if sec.index in keep],
+            )
+        lines = []
+        for c in result.chunks(**chunks):
+            row = c.to_dict()
+            row["source"] = source
+            row["title"] = result.title
+            lines.append(json.dumps(row, ensure_ascii=False))
+        return "\n".join(lines) + ("\n" if lines else "")
+    if opts.get("as_json"):
         data = result.to_dict()
         data["markdown"] = markdown
         return json.dumps(data, ensure_ascii=False, indent=2)
+    if opts.get("front_matter"):
+        return result.front_matter() + "\n" + markdown
     return markdown
+
+
+def output_suffix(opts: Dict[str, Any]) -> str:
+    if opts.get("chunks"):
+        return ".jsonl"
+    return ".json" if opts.get("as_json") else ".md"
 
 
 def _convert_one(
     converter: Any,
     item: BatchItem,
     options: Dict[str, Any],
-    pages: Optional[str],
-    as_json: bool,
+    render: Dict[str, Any],
 ) -> BatchOutcome:
     start = time.monotonic()
     try:
         result = converter.convert(item.source, **options)
-        text = _render(result, pages, as_json)
+        assets_dir = None
+        prefix = None
+        if render.get("save_assets"):
+            assets_dir = item.target.parent / f"{item.target.stem}_assets"
+            prefix = assets_dir.name
+        text = render_output(
+            result,
+            render,
+            source=item.source,
+            assets_dir=assets_dir,
+            link_prefix=prefix,
+        )
         item.target.parent.mkdir(parents=True, exist_ok=True)
         item.target.write_text(text, encoding="utf-8")
         note = ""
-        if pages and not result.pages:
+        if render.get("pages") and not result.pages:
             note = "no page info, wrote whole document"
         return BatchOutcome(
             item,
@@ -149,9 +202,9 @@ def _process_worker_init(instance_kwargs: Dict[str, Any]) -> None:
 
 
 def _process_worker(
-    item: BatchItem, options: Dict[str, Any], pages: Optional[str], as_json: bool
+    item: BatchItem, options: Dict[str, Any], render: Dict[str, Any]
 ) -> BatchOutcome:
-    return _convert_one(_WORKER_CONVERTER, item, options, pages, as_json)
+    return _convert_one(_WORKER_CONVERTER, item, options, render)
 
 
 def run_batch(
@@ -164,12 +217,24 @@ def run_batch(
     overwrite: bool = False,
     as_json: bool = False,
     pages: Optional[str] = None,
+    front_matter: bool = False,
+    chunks: Optional[Dict[str, Any]] = None,
+    save_assets: bool = False,
     options: Optional[Dict[str, Any]] = None,
     instance_kwargs: Optional[Dict[str, Any]] = None,
     converter: Any = None,
 ) -> int:
     """Convert many inputs. Returns a process exit code (0 = all succeeded)."""
     options = dict(options or {})
+    render: Dict[str, Any] = {
+        "pages": pages,
+        "as_json": as_json,
+        "front_matter": front_matter,
+        "chunks": chunks,
+        "save_assets": save_assets,
+    }
+    if save_assets:
+        options["extract_images"] = True
     if output_dir and os.path.exists(output_dir) and not os.path.isdir(output_dir):
         print(f"-o {output_dir} must be a folder in batch mode.", file=sys.stderr)
         return 2
@@ -179,7 +244,7 @@ def run_batch(
             output_dir=output_dir,
             pattern=pattern,
             recursive=recursive,
-            suffix=".json" if as_json else ".md",
+            suffix=output_suffix(render),
         )
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
@@ -206,8 +271,8 @@ def run_batch(
     if use_processes:
         executor = ProcessPoolExecutor(
             max_workers=workers,
-            initializer=_process_worker_init,
-            initargs=(instance_kwargs,),
+            initializer=cast(Any, _process_worker_init),
+            initargs=cast(Any, (instance_kwargs,)),
         )
     else:
         if converter is None:
@@ -221,12 +286,11 @@ def run_batch(
     with executor:
         if use_processes:
             futures = [
-                executor.submit(_process_worker, i, options, pages, as_json)
-                for i in items
+                executor.submit(_process_worker, i, options, render) for i in items
             ]
         else:
             futures = [
-                executor.submit(_convert_one, converter, i, options, pages, as_json)
+                executor.submit(_convert_one, converter, i, options, render)
                 for i in items
             ]
         for done, fut in enumerate(as_completed(futures), 1):
