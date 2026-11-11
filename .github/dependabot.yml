@@ -12,6 +12,8 @@ updates:
       - "/packages/markitforge-mcp"
       - "/packages/markitforge-ocr"
       - "/packages/markitforge-sample-plugin"
+      - "/packages/markitforge-gui"
+      - "/packaging"
     schedule:
       interval: "weekly"
     cooldown:

@@ -9,7 +9,7 @@
 
 Turn PDFs, Word, PowerPoint, Excel, web pages and more into clean, structured Markdown — from Python, the command line, an MCP server, or a **desktop-style app that needs no terminal**.
 
-MarkitForge is a fork of [microsoft/markitdown](https://github.com/microsoft/markitdown) (MIT). It keeps MarkItDown's API (`from markitforge import MarkItDown` still works, and plugins written for `markitdown.plugin` still load) and fixes the problems people hit most often.
+MarkitForge is a fork of [microsoft/markitdown](https://github.com/microsoft/markitdown) (MIT). It keeps MarkItDown's API (`from markitforge import MarkItDown` still works, and plugins written for `markitdown.plugin` still load).
 
 > [!IMPORTANT]
 > MarkitForge performs I/O with the privileges of the current process. Like open() or requests.get(), it will access resources that the process itself can access. Sanitize your inputs in untrusted environments, and call the narrowest `convert_*` function needed for your use case (e.g., `convert_stream()`, or `convert_local()`). See the [Security Considerations](#security-considerations) section of the documentation for more information.
@@ -18,15 +18,18 @@ MarkitForge is a fork of [microsoft/markitdown](https://github.com/microsoft/mar
 
 | Area | What changed |
 |---|---|
-| **PDF** | Tables found on every page (not only form-like pages), headings from font size, per-page sections, document metadata, warnings for scanned pages, optional [Docling](https://github.com/docling-project/docling) backend, LLM image descriptions and formula-to-LaTeX. |
+| **PDF** | Reading order for multi-column pages, tables on every page (ruled, borderless, merged cells, continued across pages), headings from the outline or fonts, page headers/footers removed, per-page sections, metadata, OCR for scanned pages (`--ocr`), image export, optional [Docling](https://github.com/docling-project/docling) backend, LLM image descriptions and formula-to-LaTeX. |
 | **Pages** | `--page-markers` puts `<!-- page N -->` between pages / slides / sheets. `--pages 1-3,7` outputs only those pages. |
 | **Excel** | Blank cells stay blank (no more `NaN`), whole numbers stay whole, hidden sheets skipped unless `--include-hidden-sheets`. |
 | **Word** | Page markers, document properties, optional headers/footers, LLM image descriptions. |
 | **Tables** | `--table-format auto` writes HTML tables only where cells are merged, so nothing is lost. |
-| **New formats** | `.doc`, `.rtf`, `.odt`, `.odp`, `.ods`, `.ppt`, `.wpd` (via LibreOffice), `.mht/.mhtml` (also OneNote and Word web exports), `.tsv`. |
+| **New formats** | `.doc`, `.rtf`, `.odt`, `.odp`, `.ods`, `.ppt`, `.wpd` and Apple `.pages` / `.numbers` / `.key` (via LibreOffice), `.eml` email, `.mht/.mhtml` (also OneNote and Word web exports), `.tsv`. |
 | **Structured results** | Every result carries `metadata`, `pages`, `assets` and `warnings`; `--json` prints them. |
 | **Batch** | `markitforge docs/ -r --glob "*.pdf" -o out/ -j 4` converts whole folders in parallel. |
-| **Safety** | URL fetches have a timeout and a size limit. The MCP server refuses `file:` URIs over HTTP unless you allow a folder. |
+| **RAG output** | `--chunks heading\|tokens` writes JSON Lines chunks with heading path and page range; `--front-matter` adds YAML metadata; `--assets-dir` saves images as files. |
+| **Config file** | Defaults, safety limits and the LLM provider (Ollama or any OpenAI-compatible API) in `~/.config/markitforge/config.toml`. |
+| **Progress and cancel** | `progress=` and `cancel_event=` in the Python API; `--progress` on the command line. |
+| **Safety** | Limits for zip bombs, huge PDFs, LLM calls and downloads; SSRF guard; sandboxed LibreOffice. See [SECURITY.md](SECURITY.md). |
 | **MCP** | New tools: `convert_to_file` (keeps big docs out of the chat), `get_document_info`, `list_supported_formats`; `pages` and `max_chars` on `convert_to_markdown`. |
 | **Lighter install** | Magika (file-type sniffing) is optional. |
 | **Quality** | A [benchmark](benchmarks/) scores tables, headings, reading order and junk on fixed documents and runs in CI. |
@@ -45,6 +48,15 @@ cd MarkitForge
 pip install -e 'packages/markitforge[all]' -e packages/markitforge-gui
 markitforge-gui
 ```
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/gui-dark.jpg">
+  <img alt="MarkitForge desktop app: a converted PDF with its table rendered as Markdown" src="assets/screenshots/gui-light.jpg" width="800">
+</picture>
+
+Features: drag in files or whole folders, progress with Cancel, Preview / Markdown (editable) / Original side by side / Details, page selection, Light, Dark or System theme, history that survives restarts, and optional AI features (OCR, image descriptions, formulas) with a local Ollama model or any OpenAI-compatible service.
+
+**Installers:** the release workflow builds a macOS `.dmg` and a Windows `.zip` (see [packaging/](packaging/)). Until releases are published and signed, build them yourself or use the launchers below.
 
 See [`packages/markitforge-gui/README.md`](packages/markitforge-gui/README.md) for options.
 
@@ -150,6 +162,42 @@ markitforge --list-formats
 ```
 
 Other flags: `--include-hidden-sheets`, `--include-headers-footers`, `--no-magika`, `--fetch-timeout SECONDS`, `--max-download-mb MB`, `--overwrite`. Run `markitforge --help` for all.
+
+#### OCR, LLM providers and the config file
+
+```bash
+# Scanned PDFs: tesseract (pip install 'markitforge[ocr]' + the tesseract program) ...
+markitforge scan.pdf --ocr --ocr-engine tesseract
+# ... or any vision model behind an OpenAI-compatible API, e.g. local Ollama:
+markitforge scan.pdf --ocr --llm-base-url http://localhost:11434/v1 --llm-model llama3.2-vision
+```
+
+Put your usual settings in `~/.config/markitforge/config.toml` (or point `MARKITFORGE_CONFIG` at a file). Command-line flags win over the file; `--no-config` ignores it.
+
+```toml
+[defaults]
+page_markers = true
+table_format = "auto"
+
+[limits]
+max_pdf_pages = 2000
+block_private_networks = true
+
+[llm]
+base_url = "http://localhost:11434/v1"
+model = "llama3.2-vision"
+api_key_env = "OPENAI_API_KEY"   # the variable's name; keys never go in the file
+```
+
+#### Output for RAG pipelines
+
+```bash
+markitforge report.pdf --chunks heading --chunk-size 800 > report.jsonl
+markitforge report.pdf --front-matter --assets-dir report_assets -o report.md
+markitforge ./docs -r -o ./out --chunks tokens --chunk-overlap 80
+```
+
+Each chunk line has `text`, `tokens`, `heading_path`, `page_start`, `page_end`, `source` and `title`. In Python: `result.chunks(by="heading", max_tokens=800)`, `result.front_matter()`, `result.save_assets("dir")`.
 
 ### Optional Dependencies
 MarkitForge has optional dependencies for activating various file formats. Earlier in this document, we installed all optional dependencies with the `[all]` option. However, you can also install them individually for more control. For example:
@@ -376,6 +424,22 @@ result.select_pages("1-3")   # Markdown for pages 1 to 3 only
 result.to_dict()         # everything, JSON-ready
 ```
 
+Progress and cancel (for UIs and long batches):
+
+```python
+import threading
+from markitforge import MarkitForge, ConversionCancelled
+
+stop = threading.Event()
+def on_progress(event):          # ProgressEvent(stage, current, total, message)
+    print(event.stage, event.current, event.total)
+
+try:
+    result = MarkitForge().convert("big.pdf", progress=on_progress, cancel_event=stop)
+except ConversionCancelled:
+    print("stopped")             # call stop.set() from another thread to cancel
+```
+
 Document Intelligence conversion in Python using an API key:
 
 ```python
@@ -450,7 +514,7 @@ docker run --rm -i markitforge:latest < ~/your-file.pdf > output.md
 
 Before starting significant work, please read [What to Contribute](#what-to-contribute), which describes what is in and out of scope for this repository.
 
-Contributions are welcome. Open an issue first for big changes. By contributing you agree your work is released under the MIT license.
+Contributions are welcome. Open an issue first for big changes. By contributing you agree your work is released under the Apache License 2.0 (see [NOTICE](NOTICE)).
 
 Fixes that are not MarkitForge-specific are best sent upstream to [microsoft/markitdown](https://github.com/microsoft/markitdown) too.
 
@@ -489,16 +553,7 @@ See `packages/markitforge-sample-plugin` to get started, and tag your repository
 
 ### How to Contribute
 
-You can help by looking at issues or helping review PRs. We have also marked some issues as 'open for contribution' and PRs as 'open for reviewing' to help facilitate community contributions. These labels are suggestions; contributions within the scope described above are welcome.
-
-<div align="center">
-
-|            | All                                                          | Especially Needs Help from Community                                                                                                      |
-| ---------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **Issues** | [All Issues](https://github.com/microsoft/markitdown/issues) | [Issues open for contribution](https://github.com/microsoft/markitdown/issues?q=is%3Aissue+is%3Aopen+label%3A%22open+for+contribution%22) |
-| **PRs**    | [All PRs](https://github.com/microsoft/markitdown/pulls)     | [PRs open for reviewing](https://github.com/microsoft/markitdown/pulls?q=is%3Apr+is%3Aopen+label%3A%22open+for+reviewing%22)              |
-
-</div>
+You can help by looking at [issues](https://github.com/Marcel-Bonifacio/MarkitForge/issues) or reviewing [pull requests](https://github.com/Marcel-Bonifacio/MarkitForge/pulls). Contributions within the scope described above are welcome.
 
 ### Running Tests and Checks
 
@@ -513,13 +568,6 @@ You can help by looking at issues or helping review PRs. We have also marked som
   ```sh
   pip install hatch  # Other ways of installing hatch: https://hatch.pypa.io/dev/install/
   hatch shell
-  hatch test
-  ```
-
-  (Alternative) Use the Devcontainer which has all the dependencies installed:
-
-  ```sh
-  # Reopen the project in Devcontainer and run:
   hatch test
   ```
 

@@ -8,7 +8,8 @@ import os
 import sys
 import codecs
 import io
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, NoReturn, Optional
 from textwrap import dedent
 from importlib.metadata import entry_points
 from .__about__ import __version__
@@ -245,6 +246,100 @@ def main():
         help="Largest URL download allowed, in MB (default 512).",
     )
 
+    forge.add_argument(
+        "--ocr",
+        action="store_true",
+        help="Read scanned PDF pages with OCR (an LLM via --llm-model, or tesseract).",
+    )
+    forge.add_argument(
+        "--ocr-engine",
+        choices=["auto", "llm", "tesseract"],
+        default=None,
+        help="OCR engine for --ocr (default auto: LLM if configured, else tesseract).",
+    )
+    forge.add_argument(
+        "--llm-base-url",
+        default=os.environ.get("MARKITFORGE_LLM_BASE_URL"),
+        help="OpenAI-compatible API URL, e.g. http://localhost:11434/v1 for Ollama.",
+    )
+    forge.add_argument(
+        "--llm-api-key-env",
+        default=None,
+        metavar="NAME",
+        help="Environment variable holding the LLM API key (default OPENAI_API_KEY).",
+    )
+    forge.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Config file (default ~/.config/markitforge/config.toml or MARKITFORGE_CONFIG).",
+    )
+    forge.add_argument(
+        "--no-config", action="store_true", help="Ignore the config file."
+    )
+    forge.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress on stderr.",
+    )
+
+    out = parser.add_argument_group("output for RAG pipelines")
+    out.add_argument(
+        "--front-matter",
+        action="store_true",
+        help="Start the Markdown with YAML front matter (title, metadata, page count).",
+    )
+    out.add_argument(
+        "--chunks",
+        choices=["heading", "tokens"],
+        default=None,
+        help="Write JSON Lines chunks instead of Markdown: split at headings, or by size.",
+    )
+    out.add_argument(
+        "--chunk-size",
+        type=int,
+        default=800,
+        metavar="TOKENS",
+        help="Largest chunk, in (estimated) tokens (default 800).",
+    )
+    out.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=0,
+        metavar="TOKENS",
+        help="Tokens repeated from the previous chunk (default 0).",
+    )
+    out.add_argument(
+        "--assets-dir",
+        metavar="DIR",
+        help="Save embedded images as files in DIR and link to them. In batch "
+        "mode each document gets <name>_assets/ next to its output.",
+    )
+
+    limits = parser.add_argument_group("safety limits (see SECURITY.md)")
+    limits.add_argument(
+        "--max-archive-mb",
+        type=float,
+        default=None,
+        help="Most uncompressed data per document in ZIP-based files (default 500).",
+    )
+    limits.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Refuse PDFs with more pages (default 5000; 0 = no limit).",
+    )
+    limits.add_argument(
+        "--max-llm-calls",
+        type=int,
+        default=None,
+        help="Most LLM calls per document (default 50).",
+    )
+    limits.add_argument(
+        "--block-private-urls",
+        action="store_true",
+        help="Refuse URLs (and redirects) to private, loopback or link-local addresses.",
+    )
+
     batch = parser.add_argument_group(
         "batch mode",
         "Used when several inputs or a folder are given. -o is then an output folder.",
@@ -272,6 +367,8 @@ def main():
 
     parser.add_argument("filename", nargs="*", help="Files, folders or URLs.")
     args = parser.parse_args()
+
+    config = _load_config(args)
 
     if args.list_formats:
         from ._formats import format_table
@@ -402,10 +499,12 @@ def main():
         markitforge = MarkitForge(enable_plugins=args.use_plugins, **cu_kwargs)
     else:
         markitforge = MarkitForge(
-            enable_plugins=args.use_plugins, **_instance_kwargs(args)
+            enable_plugins=args.use_plugins, **_instance_kwargs(args, config)
         )
 
-    options = _conversion_options(args)
+    options = _conversion_options(args, config)
+    if args.progress:
+        options["progress"] = _progress_printer()
     inputs = list(args.filename or [])
 
     if len(inputs) > 1 or (len(inputs) == 1 and os.path.isdir(inputs[0])):
@@ -421,17 +520,26 @@ def main():
                 overwrite=args.overwrite,
                 as_json=args.json,
                 pages=args.pages,
-                options=options,
+                front_matter=args.front_matter,
+                chunks=_chunk_opts(args),
+                save_assets=bool(args.assets_dir),
+                options={k: v for k, v in options.items() if k != "progress"},
                 # Cloud-service converters carry config we don't rebuild in
                 # worker processes, so those runs use threads + this instance.
                 instance_kwargs=(
                     None
                     if (args.use_docintel or args.use_cu)
-                    else {"enable_plugins": args.use_plugins, **_instance_kwargs(args)}
+                    else {
+                        "enable_plugins": args.use_plugins,
+                        **_instance_kwargs(args, config),
+                    }
                 ),
                 converter=markitforge,
             )
         )
+
+    if args.assets_dir:
+        options["extract_images"] = True
 
     if not inputs:
         # Windows pipe-backed stdin can report seekable() even though it cannot rewind.
@@ -449,21 +557,60 @@ def main():
     _handle_output(args, result)
 
 
-def _instance_kwargs(args) -> Dict[str, Any]:
+def _load_config(args):
+    from ._config import Config, load_config
+
+    if args.no_config:
+        return Config()
+    try:
+        return load_config(args.config)
+    except ValueError as exc:
+        _exit_with_error(str(exc))
+
+
+def _instance_kwargs(args, config=None) -> Dict[str, Any]:
     """Constructor options shared by single and batch mode."""
-    kw: Dict[str, Any] = {}
+    kw: Dict[str, Any] = dict(config.instance) if config is not None else {}
     if args.no_magika:
         kw["use_magika"] = False
     if args.fetch_timeout is not None:
         kw["fetch_timeout"] = (min(10.0, args.fetch_timeout), args.fetch_timeout)
     if args.max_download_mb is not None:
         kw["max_download_bytes"] = int(args.max_download_mb * 1024 * 1024)
+    if args.block_private_urls:
+        kw["block_private_networks"] = True
     return kw
 
 
-def _conversion_options(args) -> Dict[str, Any]:
-    """Per-conversion options passed to converters as keyword arguments."""
-    opts: Dict[str, Any] = {"keep_data_uris": args.keep_data_uris}
+def _llm_client(args, config):
+    """An OpenAI-compatible client from flags, else from the config file."""
+    base_url = args.llm_base_url or (config.llm.get("base_url") if config else None)
+    key_env = args.llm_api_key_env or (
+        config.llm.get("api_key_env") if config else None
+    )
+    try:
+        from openai import OpenAI
+    except ImportError:
+        _exit_with_error("LLM features need the openai package: pip install openai")
+    kwargs: Dict[str, Any] = {}
+    if base_url:
+        kwargs["base_url"] = base_url
+    api_key = os.environ.get(key_env or "OPENAI_API_KEY")
+    if api_key:
+        kwargs["api_key"] = api_key
+    elif base_url:
+        kwargs["api_key"] = "not-needed"  # local servers such as Ollama
+    return OpenAI(**kwargs)
+
+
+def _conversion_options(args, config=None) -> Dict[str, Any]:
+    """Per-conversion options passed to converters as keyword arguments.
+
+    Config file defaults and limits come first; command-line flags win.
+    """
+    opts: Dict[str, Any] = dict(config.conversion_kwargs()) if config else {}
+    if args.keep_data_uris or "keep_data_uris" not in opts:
+        opts["keep_data_uris"] = args.keep_data_uris
     if args.page_markers:
         opts["page_markers"] = True
     if args.table_format:
@@ -474,44 +621,115 @@ def _conversion_options(args) -> Dict[str, Any]:
         opts["include_headers_footers"] = True
     if args.pdf_backend:
         opts["pdf_backend"] = args.pdf_backend
+    if args.max_archive_mb is not None:
+        opts["max_archive_bytes"] = int(args.max_archive_mb * 1024 * 1024)
+    if args.max_pages is not None:
+        opts["max_pdf_pages"] = args.max_pages
+    if args.max_llm_calls is not None:
+        opts["max_llm_calls"] = args.max_llm_calls
+    if args.ocr:
+        opts["ocr_scanned_pages"] = True
+    if args.ocr_engine:
+        opts["ocr_engine"] = args.ocr_engine
+
+    model = args.llm_model or (config.llm.get("model") if config else None)
+    wants_llm = (
+        args.describe_images
+        or args.transcribe_formulas
+        or opts.get("describe_images")
+        or opts.get("transcribe_formulas")
+        or (
+            opts.get("ocr_scanned_pages")
+            and opts.get("ocr_engine", "auto") != "tesseract"
+        )
+    )
     if args.describe_images or args.transcribe_formulas:
-        if not args.llm_model:
+        if not model:
             _exit_with_error(
                 "--describe-images and --transcribe-formulas need --llm-model "
-                "(or MARKITFORGE_LLM_MODEL)."
+                "(or MARKITFORGE_LLM_MODEL, or [llm] model in the config file)."
             )
-        try:
-            from openai import OpenAI
-        except ImportError:
-            _exit_with_error(
-                "These options need the openai package: pip install openai"
-            )
-        opts["llm_client"] = OpenAI()
-        opts["llm_model"] = args.llm_model
-        opts["describe_images"] = bool(args.describe_images)
-        opts["transcribe_formulas"] = bool(args.transcribe_formulas)
+    if wants_llm and model:
+        opts["llm_client"] = _llm_client(args, config)
+        opts["llm_model"] = model
+        if config and config.llm.get("prompt"):
+            opts.setdefault("llm_prompt", config.llm["prompt"])
+    if args.describe_images:
+        opts["describe_images"] = True
+    if args.transcribe_formulas:
+        opts["transcribe_formulas"] = True
     return opts
 
 
-def _render(args, result: DocumentConverterResult) -> str:
-    """The text to write for one result, honouring --pages and --json."""
-    markdown = result.markdown
-    if args.pages:
-        try:
-            markdown = result.select_pages(args.pages)
-        except ValueError as exc:
-            _exit_with_error(f"--pages: {exc}")
-    if args.json:
-        import json
+def _chunk_opts(args) -> Optional[Dict[str, Any]]:
+    if not args.chunks:
+        return None
+    if args.chunk_size < 16:
+        _exit_with_error("--chunk-size must be at least 16.")
+    return {
+        "by": args.chunks,
+        "max_tokens": args.chunk_size,
+        "overlap": max(0, args.chunk_overlap),
+    }
 
-        data = result.to_dict()
-        data["markdown"] = markdown
-        return json.dumps(data, ensure_ascii=False, indent=2)
-    return markdown
+
+def _progress_printer():
+    """A progress callback that redraws one line on stderr."""
+    last = {"text": ""}
+
+    tty = sys.stderr.isatty()
+
+    def show(event) -> None:
+        total = f"/{event.total}" if event.total else ""
+        if not tty:  # logs: one line per event, no carriage returns
+            msg = f"  {event.message[:60]}" if event.message else ""
+            print(f"{event.stage} {event.current}{total}{msg}", file=sys.stderr)
+            return
+        text = f"\r{event.stage} {event.current}{total}"
+        if event.message:
+            text += f"  {event.message[:60]}"
+        pad = max(0, len(last["text"]) - len(text))
+        print(text + " " * pad, end="", file=sys.stderr, flush=True)
+        last["text"] = text
+
+    return show
+
+
+def _render(args, result: DocumentConverterResult) -> str:
+    """The text to write for one result, honouring the output flags."""
+    from ._batch import render_output
+
+    assets_dir = None
+    prefix = None
+    if args.assets_dir:
+        assets_dir = Path(args.assets_dir)
+        base = Path(args.output).resolve().parent if args.output else Path.cwd()
+        try:
+            prefix = os.path.relpath(assets_dir.resolve(), base).replace(os.sep, "/")
+        except ValueError:  # different drive on Windows
+            prefix = assets_dir.resolve().as_posix()
+    opts = {
+        "pages": args.pages,
+        "as_json": args.json,
+        "front_matter": args.front_matter,
+        "chunks": _chunk_opts(args),
+    }
+    try:
+        return render_output(
+            result,
+            opts,
+            source=(args.filename or [None])[0],
+            assets_dir=assets_dir,
+            link_prefix=prefix,
+        )
+    except ValueError as exc:
+        _exit_with_error(f"--pages: {exc}" if args.pages else str(exc))
 
 
 def _handle_output(args, result: DocumentConverterResult):
     """Handle output to stdout or file"""
+    if args.progress:
+        print(file=sys.stderr)
     text = _render(args, result)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
@@ -523,7 +741,7 @@ def _handle_output(args, result: DocumentConverterResult):
         print(text.encode(encoding, errors="replace").decode(encoding))
 
 
-def _exit_with_error(message: str):
+def _exit_with_error(message: str) -> NoReturn:
     print(message, file=sys.stderr)
     sys.exit(1)
 

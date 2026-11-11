@@ -74,7 +74,7 @@ def _extract_images_from_page(page: Any) -> list[dict]:
                         img_bytes = img_dict["stream"].get_data()
 
                         # Try to open as PIL Image to validate/decode
-                        pil_img = Image.open(io.BytesIO(img_bytes))
+                        pil_img: Image.Image = Image.open(io.BytesIO(img_bytes))
 
                         # Convert to RGB if needed (handle CMYK, etc.)
                         if pil_img.mode not in ("RGB", "L"):
@@ -399,38 +399,47 @@ class PdfConverterWithOCR(DocumentConverter):
                         continue
 
         except Exception:
-            # pdfplumber failed (e.g. malformed EOF) — try PyMuPDF for rendering
+            # pdfplumber failed (e.g. malformed EOF): render with PDFium
+            # (pypdfium2) directly, which repairs many broken files.
             markdown_parts = []
             try:
-                import fitz  # PyMuPDF
+                import pypdfium2 as pdfium
 
                 pdf_bytes.seek(0)
-                doc = fitz.open(stream=pdf_bytes.read(), filetype="pdf")
-                for page_num in range(1, doc.page_count + 1):
-                    try:
-                        markdown_parts.append(f"\n## Page {page_num}\n")
-                        page = doc[page_num - 1]
-                        mat = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI
-                        pix = page.get_pixmap(matrix=mat)
-                        img_stream = io.BytesIO(pix.tobytes("png"))
-                        img_stream.seek(0)
+                doc = pdfium.PdfDocument(pdf_bytes.read())
+                try:
+                    for page_num in range(1, len(doc) + 1):
+                        try:
+                            markdown_parts.append(f"\n## Page {page_num}\n")
+                            page = doc[page_num - 1]
+                            try:
+                                bitmap = page.render(scale=300 / 72)  # 300 DPI
+                                image = bitmap.to_pil()
+                            finally:
+                                page.close()
+                            img_stream = io.BytesIO()
+                            image.save(img_stream, format="PNG")
+                            img_stream.seek(0)
 
-                        ocr_result = ocr_cache.extract_text(ocr_service, img_stream)
+                            ocr_result = ocr_cache.extract_text(ocr_service, img_stream)
 
-                        if ocr_result.text.strip():
-                            text = ocr_result.text.strip()
-                            markdown_parts.append(f"*[Image OCR]\n{text}\n[End OCR]*")
-                        else:
+                            if ocr_result.text.strip():
+                                text = ocr_result.text.strip()
+                                markdown_parts.append(
+                                    f"*[Image OCR]\n{text}\n[End OCR]*"
+                                )
+                            else:
+                                markdown_parts.append(
+                                    "*[No text could be extracted from this page]*"
+                                )
+
+                        except Exception as e:
                             markdown_parts.append(
-                                "*[No text could be extracted from this page]*"
+                                f"*[Error processing page {page_num}: {str(e)}]*"
                             )
-
-                    except Exception as e:
-                        markdown_parts.append(
-                            f"*[Error processing page {page_num}: {str(e)}]*"
-                        )
-                        continue
-                doc.close()
+                            continue
+                finally:
+                    doc.close()
             except Exception:
                 return "*[Error: Could not process scanned PDF]*"
 

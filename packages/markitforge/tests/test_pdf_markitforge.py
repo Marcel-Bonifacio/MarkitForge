@@ -354,7 +354,8 @@ class TestPagesAndMetadata:
         result = MarkitForge().convert(path)
         assert (
             "Page 2 has no text layer; it may be a scan. "
-            "Try the markitforge-ocr plugin." in result.warnings
+            "Use ocr_scanned_pages=True (CLI --ocr) or the markitforge-ocr plugin."
+            in result.warnings
         )
         assert len(result.pages) == 3
 
@@ -362,7 +363,7 @@ class TestPagesAndMetadata:
         warnings = _scan_warnings(list(range(1, 11)) + [14])
         assert warnings == [
             "Pages 1-10, 14 have no text layer; they may be scans. "
-            "Try the markitforge-ocr plugin."
+            "Use ocr_scanned_pages=True (CLI --ocr) or the markitforge-ocr plugin."
         ]
 
     def test_text_pdf_has_no_warnings(self):

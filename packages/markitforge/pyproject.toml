@@ -55,6 +55,7 @@ all = [
   "azure-identity",
 ]
 magika = ["magika>=0.6.1,<2"]
+ocr = ["pytesseract>=0.3.10"]  # also needs the tesseract program
 pptx = ["python-pptx"]
 docx = ["mammoth>=1.12.2,<2", "lxml"]
 xlsx = ["pandas", "openpyxl"]
@@ -87,6 +88,7 @@ features = ["all"]
 extra-dependencies = [
   "openai",
   "pyyaml",
+  "reportlab",
 ]
 
 [tool.hatch.envs.types]

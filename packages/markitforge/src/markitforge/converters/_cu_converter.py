@@ -43,7 +43,7 @@ except ImportError:
     class DefaultAzureCredential:  # type: ignore[no-redef]
         pass
 
-    def to_llm_input(*args, **kwargs):  # type: ignore[no-redef]
+    def to_llm_input(*args, **kwargs):  # type: ignore[no-redef,misc]
         pass
 
 

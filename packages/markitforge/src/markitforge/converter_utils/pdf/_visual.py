@@ -34,6 +34,7 @@ from typing import (
 )
 
 from ..._base_converter import DocumentAsset
+from ..._exceptions import ConversionCancelled
 from ..._stream_info import StreamInfo
 from .._text_safety import safe_alt_text, safe_latex
 from ._layout import Block, TextLine
@@ -59,6 +60,11 @@ MIN_RENDER_RESOLUTION = 36.0
 # Renders that need no LLM call (identical images) are capped at this
 # multiple of max_llm_calls.
 RENDERS_PER_LLM_CALL = 4
+# Image export (extract_images) without an LLM renders at most this many
+# images per document (0 = unlimited).
+DEFAULT_MAX_EXPORT_RENDERS = 1000
+# ... and keeps at most this many bytes of them (0 = unlimited).
+DEFAULT_MAX_EXPORT_BYTES = 256 * 1024 * 1024
 
 FORMULA_PROMPT = (
     "Transcribe the mathematical formula in this image into LaTeX. "
@@ -89,6 +95,14 @@ class VisualBudget:
     images: Dict[Hashable, Tuple[str, Optional[str]]] = field(default_factory=dict)
     # PNG digest -> validated LaTeX, "" for no answer, None for rejected
     formulas: Dict[str, Optional[str]] = field(default_factory=dict)
+    # Image export without captions: renders done and their cap.
+    max_export_renders: int = DEFAULT_MAX_EXPORT_RENDERS
+    export_renders: int = 0
+    max_export_bytes: int = DEFAULT_MAX_EXPORT_BYTES
+    export_bytes: int = 0
+    export_exhausted: bool = False
+    # Called with the running count after every LLM call is granted.
+    on_llm_call: Optional[Callable[[int], None]] = field(default=None, repr=False)
 
     @property
     def max_renders(self) -> int:
@@ -98,7 +112,8 @@ class VisualBudget:
         if not self.exhausted:
             self.exhausted = True
             warnings.append(
-                f"Stopped describing images and transcribing formulas after "
+                f"Stopped describing images, transcribing formulas or reading "
+                f"scanned pages after "
                 f"{self.llm_calls} LLM call(s) (max_llm_calls={self.max_llm_calls}); "
                 "the rest of the document was converted without them."
             )
@@ -120,6 +135,37 @@ class VisualBudget:
         if self.max_llm_calls and self.llm_calls >= self.max_llm_calls:
             return self._stop(warnings)
         self.llm_calls += 1
+        if self.on_llm_call is not None:
+            self.on_llm_call(self.llm_calls)
+        return True
+
+    def can_export(self, warnings: List[str]) -> bool:
+        """Count one render for image export; False once its cap is hit."""
+        if self.export_exhausted:
+            return False
+        if self.max_export_renders and self.export_renders >= self.max_export_renders:
+            self.export_exhausted = True
+            warnings.append(
+                f"Stopped exporting images after {self.export_renders} "
+                "render(s); the remaining images were left out."
+            )
+            return False
+        self.export_renders += 1
+        return True
+
+    def can_keep_export(self, size: int, warnings: List[str]) -> bool:
+        """Count ``size`` exported bytes; False once their cap is passed."""
+        if self.export_exhausted:
+            return False
+        if self.max_export_bytes and self.export_bytes + size > self.max_export_bytes:
+            self.export_exhausted = True
+            warnings.append(
+                f"Stopped exporting images after {self.export_bytes} "
+                f"byte(s) (max_export_bytes={self.max_export_bytes}); "
+                "the remaining images were left out."
+            )
+            return False
+        self.export_bytes += size
         return True
 
 
@@ -340,8 +386,46 @@ def describe_page_images(
     Repeated images (same XObject, or identical rendering) reuse the first
     caption and asset instead of calling the LLM again.
     """
+    return page_image_blocks(
+        page,
+        page_no,
+        describe=True,
+        export=False,
+        client=client,
+        model=model,
+        prompt=prompt,
+        caption_fn=caption_fn,
+        assets=assets,
+        warnings=warnings,
+        budget=budget,
+    )
+
+
+def page_image_blocks(
+    page: Any,
+    page_no: int,
+    *,
+    describe: bool,
+    export: bool,
+    assets: List[DocumentAsset],
+    warnings: List[str],
+    budget: Optional[VisualBudget] = None,
+    client: Any = None,
+    model: str = "",
+    prompt: Optional[str] = None,
+    caption_fn: Optional[CaptionFn] = None,
+) -> List[Block]:
+    """Image links for a page, as Markdown blocks at the images' positions.
+
+    ``describe`` asks the LLM for alt text (within the budget's LLM calls);
+    ``export`` keeps every distinct image as a PNG asset even when it gets
+    no description. Without ``export``, only described images are kept, as
+    describe_images always did. Repeated images (same XObject, or identical
+    rendering) reuse the first asset and caption.
+    """
     if budget is None:
         budget = VisualBudget()
+    describe = describe and caption_fn is not None
     blocks: List[Block] = []
     description: Optional[str]
     for k, (bbox, key) in enumerate(_page_image_refs(page), start=1):
@@ -349,7 +433,8 @@ def describe_page_images(
             name, description = budget.images[key]
             blocks.append(_image_block(bbox, name, description))
             continue
-        if not budget.can_render(warnings):
+        caption = describe and budget.can_render(warnings)
+        if not caption and not (export and budget.can_export(warnings)):
             continue
         name = f"page{page_no}_img{k}.png"
         try:
@@ -374,16 +459,28 @@ def describe_page_images(
                 budget.images[key] = (name, description)
             blocks.append(_image_block(bbox, name, description))
             continue
-        if not budget.can_call_llm(warnings):
+        if export and not budget.can_keep_export(len(png), warnings):
+            continue
+        caption = caption and budget.can_call_llm(warnings)
+        if not caption and not export:
             continue
         description = None
-        try:
-            description = _ask(
-                png, caption_fn=caption_fn, client=client, model=model, prompt=prompt
-            )
-        except Exception as exc:
-            logger.warning("Captioning %s failed: %s", name, exc, exc_info=True)
-            warnings.append(f"Could not describe image {k} on page {page_no}: {exc}")
+        if caption:
+            try:
+                description = _ask(
+                    png,
+                    caption_fn=caption_fn,  # type: ignore[arg-type]
+                    client=client,
+                    model=model,
+                    prompt=prompt,
+                )
+            except ConversionCancelled:
+                raise
+            except Exception as exc:
+                logger.warning("Captioning %s failed: %s", name, exc, exc_info=True)
+                warnings.append(
+                    f"Could not describe image {k} on page {page_no}: {exc}"
+                )
         assets.append(
             DocumentAsset(
                 name=name,
@@ -509,6 +606,8 @@ def transcribe_math_regions(
                 )
                 latex = safe_latex(clean_latex(answer or ""))
                 budget.formulas[digest] = latex
+        except ConversionCancelled:
+            raise
         except RegionTooLarge as exc:
             logger.warning("Skipped a formula on page %s: %s", page_no, exc)
             warnings.append(

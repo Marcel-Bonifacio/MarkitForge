@@ -18,9 +18,20 @@ Hardening against hostile input:
   ``sandbox-exec`` on macOS and an unprivileged network namespace
   (``unshare -rn``) on Linux. Set MARKITFORGE_LIBREOFFICE_SANDBOX=0 to turn
   this off.
+
+Apple iWork files (.pages, .numbers, .key) go through LibreOffice's
+libetonyek import filters ("Apple Pages", "Apple Numbers", "Apple Keynote").
+They are ZIP packages, so only streams that start like a ZIP are accepted
+(a ".key" PEM file is left to the text converter), and the package is
+checked against the archive limits first. When LibreOffice is missing,
+fails, or produces nothing, the preview the package carries
+(``QuickLook/Preview.pdf`` from iWork '09, else ``preview.jpg``) is
+converted through the parent MarkitForge instead, with a warning saying the
+text comes from a preview.
 """
 
 import functools
+import io
 import logging
 import os
 import shutil
@@ -28,12 +39,23 @@ import signal
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 from .._base_converter import DocumentConverter, DocumentConverterResult
-from .._exceptions import FileConversionException, MissingDependencyException
+from .._exceptions import (
+    ConversionCancelled,
+    FileConversionException,
+    MissingDependencyException,
+    ResourceLimitException,
+)
 from .._stream_info import StreamInfo
+from ..converter_utils._archive_limits import (
+    check_archive_stream,
+    get_budget,
+    read_member,
+)
 from ._docx_converter import DocxConverter
 from ._pptx_converter import PptxConverter
 from ._xlsx_converter import XlsxConverter
@@ -49,9 +71,12 @@ _TEXT_EXTENSIONS = (
     ".ott",
     ".fodt",
     ".wpd",
+    ".pages",
 )
-_PRESENTATION_EXTENSIONS = (".ppt", ".pps", ".pot", ".odp", ".otp", ".fodp")
-_SPREADSHEET_EXTENSIONS = (".ods", ".ots", ".fods", ".xlsb")
+_PRESENTATION_EXTENSIONS = (".ppt", ".pps", ".pot", ".odp", ".otp", ".fodp", ".key")
+_SPREADSHEET_EXTENSIONS = (".ods", ".ots", ".fods", ".xlsb", ".numbers")
+#: Apple iWork packages (ZIP files).
+_IWORK_EXTENSIONS = (".pages", ".numbers", ".key")
 
 _MIME_TO_EXTENSION = {
     "application/msword": ".doc",
@@ -68,6 +93,12 @@ _MIME_TO_EXTENSION = {
     "application/vnd.oasis.opendocument.spreadsheet": ".ods",
     "application/vnd.oasis.opendocument.spreadsheet-template": ".ots",
     "application/vnd.ms-excel.sheet.binary.macroenabled.12": ".xlsb",
+    "application/vnd.apple.pages": ".pages",
+    "application/x-iwork-pages-sffpages": ".pages",
+    "application/vnd.apple.numbers": ".numbers",
+    "application/x-iwork-numbers-sffnumbers": ".numbers",
+    "application/vnd.apple.keynote": ".key",
+    "application/x-iwork-keynote-sffkey": ".key",
 }
 
 ACCEPTED_FILE_EXTENSIONS = (
@@ -75,7 +106,8 @@ ACCEPTED_FILE_EXTENSIONS = (
 )
 
 # extension -> LibreOffice import filter. Filter names checked against
-# LibreOffice 26.8 (registry/*.xcd) by converting a sample of each format.
+# LibreOffice 26.8 (registry/*.xcd) by converting a sample of each format
+# (the iWork ones with the templates Apple's iWork apps ship).
 _INPUT_FILTERS: Dict[str, str] = {
     ".doc": "MS Word 97",
     ".dot": "MS Word 97 Vorlage",
@@ -94,7 +126,19 @@ _INPUT_FILTERS: Dict[str, str] = {
     ".ots": "calc8_template",
     ".fods": "OpenDocument Spreadsheet Flat XML",
     ".xlsb": "Calc MS Excel 2007 Binary",
+    ".pages": "Apple Pages",
+    ".numbers": "Apple Numbers",
+    ".key": "Apple Keynote",
 }
+
+#: Previews inside iWork packages, best first (compared case-insensitively).
+_IWORK_PREVIEWS = (
+    ("quicklook/preview.pdf", ".pdf", "application/pdf"),
+    ("preview.jpg", ".jpg", "image/jpeg"),
+    ("preview-web.jpg", ".jpg", "image/jpeg"),
+    ("quicklook/thumbnail.jpg", ".jpg", "image/jpeg"),
+)
+_ZIP_MAGIC = b"PK\x03\x04"
 _RTF_FILTER = "Rich Text Format"
 
 _TARGETS: Dict[str, Tuple[str, str]] = {
@@ -368,7 +412,19 @@ class LibreOfficeConverter(DocumentConverter):
     ) -> bool:
         # Accept even when soffice is missing, so the user gets an install hint
         # instead of a silent fallback to a less suitable converter.
-        return _resolve_extension(stream_info) is not None
+        extension = _resolve_extension(stream_info)
+        if extension is None:
+            return False
+        if extension in _IWORK_EXTENSIONS:
+            # iWork documents are ZIP packages; ".key" is also a common name
+            # for PEM keys, which must reach the text converter instead.
+            position = file_stream.tell()
+            try:
+                head = file_stream.read(4)
+            finally:
+                file_stream.seek(position)
+            return head == _ZIP_MAGIC
+        return True
 
     def convert(
         self,
@@ -383,6 +439,19 @@ class LibreOfficeConverter(DocumentConverter):
                 f"LibreOfficeConverter cannot handle {stream_info.extension!r}."
             )
 
+        if extension in _IWORK_EXTENSIONS:
+            return self._convert_iwork(file_stream, stream_info, extension, kwargs)
+        return self._convert_with_soffice(file_stream, stream_info, extension, kwargs)
+
+    def _convert_with_soffice(
+        self,
+        file_stream: BinaryIO,
+        stream_info: StreamInfo,
+        extension: str,
+        kwargs: Dict[str, Any],
+    ) -> DocumentConverterResult:
+        family = _family(extension)
+        assert family is not None
         soffice = find_soffice()
         if not soffice:
             raise MissingDependencyException(INSTALL_HINT.format(extension=extension))
@@ -448,3 +517,122 @@ class LibreOfficeConverter(DocumentConverter):
         result.metadata.setdefault("source_format", extension.lstrip("."))
         result.metadata["converted_via"] = "libreoffice"
         return result
+
+    # ------------------------------------------------------------- iWork
+
+    def _convert_iwork(
+        self,
+        file_stream: BinaryIO,
+        stream_info: StreamInfo,
+        extension: str,
+        kwargs: Dict[str, Any],
+    ) -> DocumentConverterResult:
+        # A package is read twice (LibreOffice, then maybe its preview); check
+        # it against the archive limits once, before either.
+        budget = get_budget(kwargs)
+        start = file_stream.tell()
+        check_archive_stream(file_stream, budget)
+        data = file_stream.read()
+        file_stream.seek(start)
+
+        reason: str
+        failure: Optional[BaseException] = None
+        try:
+            result = self._convert_with_soffice(
+                io.BytesIO(data), stream_info, extension, kwargs
+            )
+            if result.markdown.strip():
+                return result
+            reason = "LibreOffice found no content in it"
+        except (ResourceLimitException, ConversionCancelled):
+            raise
+        except MissingDependencyException as exc:
+            failure = exc
+            reason = "LibreOffice is not installed"
+        except Exception as exc:
+            failure = exc
+            reason = f"LibreOffice could not import it ({exc})"
+
+        preview = _iwork_preview(data, budget)
+        if preview is None:
+            if failure is not None:
+                raise failure
+            return result
+        name, preview_ext, preview_mime, preview_data = preview
+        preview_result = _convert_with_parents(
+            preview_data,
+            StreamInfo(
+                extension=preview_ext,
+                mimetype=preview_mime,
+                filename=os.path.basename(name),
+            ),
+            kwargs,
+        )
+        preview_result.warnings.insert(
+            0,
+            f"Converted the preview image of this {extension} document "
+            f"({name}), not the document itself: {reason}. The preview may "
+            "show only the first page or slide and holds no editable text "
+            "structure.",
+        )
+        preview_result.metadata["source_format"] = extension.lstrip(".")
+        preview_result.metadata["converted_via"] = "preview"
+        preview_result.metadata["preview_part"] = name
+        return preview_result
+
+
+def _iwork_preview(data: bytes, budget: Any) -> Optional[Tuple[str, str, str, bytes]]:
+    """(part name, extension, media type, bytes) of the package's best preview."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, OSError, ValueError, EOFError):
+        return None
+    with archive:
+        infos = {info.filename.lower(): info for info in archive.infolist()}
+        for wanted, extension, mime in _IWORK_PREVIEWS:
+            info = infos.get(wanted)
+            if info is None or info.is_dir():
+                continue
+            return info.filename, extension, mime, read_member(archive, info, budget)
+    return None
+
+
+def _convert_with_parents(
+    data: bytes, stream_info: StreamInfo, kwargs: Dict[str, Any]
+) -> DocumentConverterResult:
+    """Convert ``data`` with the parent MarkitForge's converters, best first.
+
+    Falls back to the built-in PDF/image converters when this converter is
+    used on its own. Limit hits and cancellation propagate.
+    """
+    registrations = kwargs.get("_parent_converters") or []
+    converters: List[DocumentConverter] = [
+        r.converter for r in sorted(registrations, key=lambda r: r.priority)
+    ]
+    if not converters:
+        from ._image_converter import ImageConverter
+        from ._pdf_converter import PdfConverter
+
+        converters = [PdfConverter(), ImageConverter()]
+    options = {k: v for k, v in kwargs.items() if k not in ("file_extension", "url")}
+    errors: List[str] = []
+    for converter in converters:
+        if isinstance(converter, LibreOfficeConverter):
+            continue
+        stream = io.BytesIO(data)
+        try:
+            if not converter.accepts(stream, stream_info, **options):
+                continue
+        except NotImplementedError:
+            continue
+        stream.seek(0)
+        try:
+            return converter.convert(stream, stream_info, **options)
+        except (ResourceLimitException, ConversionCancelled):
+            raise
+        except Exception as exc:
+            errors.append(f"{type(converter).__name__}: {exc}")
+    raise FileConversionException(
+        "Could not convert the document preview"
+        + (": " + "; ".join(errors) if errors else ".")
+    )

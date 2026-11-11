@@ -29,13 +29,16 @@ from .._exceptions import (
     MISSING_DEPENDENCY_MESSAGE,
     ResourceLimitException,
 )
+from .._progress import check_cancelled, report_progress
 from .._stream_info import StreamInfo
 from ..converter_utils._archive_limits import (
     ArchiveBudget,
+    ImageAssets,
     check_archive_stream,
     copy_member,
     get_budget,
     read_member,
+    wants_images,
 )
 from ..converter_utils._sheet_layout import Block, MergedRange, detect_blocks
 from ..converter_utils._xlsx_images import _relationships
@@ -652,6 +655,9 @@ class XlsxConverter(DocumentConverter):
 
     The workbook is checked against the archive resource limits before any
     part is read; a hit raises ``ResourceLimitException``.
+
+    With ``extract_images`` every distinct image anchored in a sheet becomes
+    an asset (``sheet1_img1.png``), listed after the sheet's tables.
     """
 
     def __init__(self):
@@ -712,7 +718,9 @@ class XlsxConverter(DocumentConverter):
             workbook_stream,
         ):
             images = None
-            if type(self)._image_to_html is not XlsxConverter._image_to_html:
+            hooked = type(self)._image_to_html is not XlsxConverter._image_to_html
+            export = ImageAssets() if wants_images(kwargs) else None
+            if hooked or export is not None:
                 from ..converter_utils._xlsx_images import _XlsxImages
 
                 images = _XlsxImages(workbook_stream)
@@ -724,6 +732,7 @@ class XlsxConverter(DocumentConverter):
                 )
 
             for index, s in enumerate(sheets, start=1):
+                check_cancelled(kwargs)
                 chunk = f"## {s}\n"
                 for html_content in _sheet_fragments(
                     sheets[s], merged.get(str(s), ()), layout, spans
@@ -734,7 +743,26 @@ class XlsxConverter(DocumentConverter):
                         ).markdown.strip()
                         + "\n\n"
                     )
-                if images is not None:
+                if images is not None and export is not None:
+                    added = [
+                        export.add(
+                            data,
+                            info.mimetype,
+                            prefix=f"sheet{index}_img",
+                            page=index,
+                        )
+                        for data, info in images._sheets.get(str(s), [])
+                    ]
+                    names = [name for name in added if name]
+                    if names and not hooked:
+                        chunk += (
+                            "### Images in this sheet:\n\n"
+                            + "\n\n".join(
+                                f"![]({name})" for name in dict.fromkeys(names)
+                            )
+                            + "\n\n"
+                        )
+                if images is not None and hooked:
                     image_content = images.to_html(s, self._image_to_html, kwargs)
                     if image_content:
                         chunk += (
@@ -751,6 +779,7 @@ class XlsxConverter(DocumentConverter):
                         index=index, markdown=chunk.strip(), title=str(s), kind="sheet"
                     )
                 )
+                report_progress(kwargs, "sheet", index, len(sheets))
 
         metadata: Dict[str, Any] = dict(props)
         metadata["sheet_names"] = (
@@ -763,7 +792,9 @@ class XlsxConverter(DocumentConverter):
             title=props.get("title"),
             metadata=metadata,
             pages=sections,
-            warnings=_hidden_sheet_warning(hidden, include_hidden),
+            assets=export.assets if export is not None else [],
+            warnings=_hidden_sheet_warning(hidden, include_hidden)
+            + (export.warnings if export is not None else []),
         )
 
     def _image_to_html(
@@ -885,6 +916,7 @@ class XlsConverter(DocumentConverter):
         md_content = ""
         sections: List[DocumentSection] = []
         for index, s in enumerate(sheets, start=1):
+            check_cancelled(kwargs)
             chunk = f"## {s}\n"
             for html_content in _sheet_fragments(
                 sheets[s], merged.get(str(s), ()), layout, spans
@@ -903,6 +935,7 @@ class XlsConverter(DocumentConverter):
                     index=index, markdown=chunk.strip(), title=str(s), kind="sheet"
                 )
             )
+            report_progress(kwargs, "sheet", index, len(sheets))
 
         metadata: Dict[str, Any] = {
             "sheet_names": [name for name, _ in states],

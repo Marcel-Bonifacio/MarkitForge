@@ -8,7 +8,7 @@ import html
 import re
 import markdownify
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse, urlunparse
 
 _PERCENT_ENCODED_OCTET = re.compile(r"%[0-9A-Fa-f]{2}")
@@ -47,12 +47,130 @@ def _cell_text(cell: Any) -> str:
     return _WHITESPACE.sub(" ", cell.get_text(" ")).strip()
 
 
+# Inline markup kept inside HTML table cells: source tag -> emitted tag.
+_INLINE_TAGS = {
+    "strong": "strong",
+    "b": "strong",
+    "em": "em",
+    "i": "em",
+    "code": "code",
+}
+_SAFE_HREF_SCHEMES = ("http", "https", "mailto")
+_HREF_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):")
+# C0 controls, DEL and whitespace: browsers ignore them inside a scheme, so
+# "java\tscript:" must not slip past the scheme check.
+_HREF_IGNORED = re.compile(r"[\x00-\x20\x7f]+")
+# Elements whose boundaries separate words (get_text(" ") puts a space there).
+_CELL_BLOCKS = frozenset(
+    "address article aside blockquote caption dd div dl dt figcaption figure "
+    "footer h1 h2 h3 h4 h5 h6 header hr li main nav ol p pre section table "
+    "tbody td tfoot th thead tr ul".split()
+)
+_CELL_SKIP = frozenset(("script", "style", "template", "noscript"))
+_MAX_CELL_DEPTH = 64
+
+
+def safe_href(href: Any) -> Optional[str]:
+    """``href`` if it is http(s), mailto or relative; otherwise None."""
+    if not isinstance(href, str):
+        return None
+    cleaned = _HREF_IGNORED.sub("", href)
+    if not cleaned:
+        return None
+    match = _HREF_SCHEME.match(cleaned)
+    if match is not None:
+        if match.group(1).lower() not in _SAFE_HREF_SCHEMES:
+            return None
+    elif ":" in cleaned.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]:
+        # Something like "x y:..." that is neither a scheme nor relative.
+        return None
+    return cleaned
+
+
+def _has_inline_markup(cell: Any) -> bool:
+    for tag in cell.find_all(True):
+        if tag.name in _INLINE_TAGS or tag.name == "br":
+            return True
+        if tag.name == "a" and safe_href(tag.get("href")) is not None:
+            return True
+    return False
+
+
+def _cell_markup(cell: Any) -> str:
+    """Cell content as escaped text plus a small set of safe inline tags.
+
+    Kept: <strong>/<b>, <em>/<i>, <code>, <br> and <a href> with an http(s),
+    mailto or relative URL, all re-emitted without any other attribute. Every
+    other element is dropped (its text is kept, escaped); script and style
+    content is dropped entirely.
+    """
+    from bs4 import CData, NavigableString, Tag
+
+    out: List[str] = []
+
+    def walk(node: Any, depth: int, in_link: bool) -> None:
+        for child in node.children:
+            if isinstance(child, NavigableString):
+                if type(child) in (NavigableString, CData):
+                    out.append(html.escape(_WHITESPACE.sub(" ", str(child))))
+                continue
+            if not isinstance(child, Tag) or child.name in _CELL_SKIP:
+                continue
+            name = child.name
+            if depth >= _MAX_CELL_DEPTH:
+                out.append(html.escape(" " + _cell_text(child) + " "))
+                continue
+            if name == "br":
+                out.append("<br>")
+                continue
+            if name in _CELL_BLOCKS:
+                out.append(" ")
+                walk(child, depth + 1, in_link)
+                out.append(" ")
+                continue
+            emitted = _INLINE_TAGS.get(name)
+            href = None
+            if name == "a" and not in_link:
+                href = safe_href(child.get("href"))
+            if href is not None:
+                start = len(out)
+                out.append(f'<a href="{html.escape(href, quote=True)}">')
+                walk(child, depth + 1, True)
+                if "".join(out[start + 1 :]).strip():
+                    out.append("</a>")
+                else:
+                    del out[start:]
+            elif emitted is not None:
+                start = len(out)
+                out.append(f"<{emitted}>")
+                walk(child, depth + 1, in_link)
+                if "".join(out[start + 1 :]).strip():
+                    out.append(f"</{emitted}>")
+                else:
+                    del out[start:]
+            else:
+                walk(child, depth + 1, in_link)
+
+    walk(cell, 0, False)
+    text = _WHITESPACE.sub(" ", "".join(out)).strip()
+    return re.sub(r" ?<br> ?", "<br>", text)
+
+
+def _cell_html(cell: Any) -> str:
+    if _has_inline_markup(cell):
+        return _cell_markup(cell)
+    # Unchanged output for cells without inline markup.
+    return html.escape(_cell_text(cell))
+
+
 def table_to_html(table: Any) -> str:
     """Render a BeautifulSoup <table> as minimal, sanitized HTML.
 
     Only table/thead/tbody/tr/th/td are emitted, the only attributes kept are
     colspan and rowspan (as validated integers), and all cell text is escaped.
-    Nested markup is flattened to text.
+    Inside cells, <strong>/<b>, <em>/<i>, <code>, <br> and links with an
+    http(s), mailto or relative href are kept (without other attributes);
+    any other markup is flattened to text.
     """
     head: List[str] = []
     body: List[str] = []
@@ -73,7 +191,7 @@ def table_to_html(table: Any) -> str:
                 n = _span(cell, name)
                 if n > 1:
                     attrs += f' {name}="{n}"'
-            parts.append(f"<{tag}{attrs}>{html.escape(_cell_text(cell))}</{tag}>")
+            parts.append(f"<{tag}{attrs}>{_cell_html(cell)}</{tag}>")
         line = "<tr>" + "".join(parts) + "</tr>"
         in_head = getattr(row.parent, "name", None) == "thead"
         if not has_thead and i == 0 and all(c.name == "th" for c in cells):
@@ -113,6 +231,8 @@ class _CustomMarkdownify(markdownify.MarkdownConverter):
     - Ensuring URIs are properly escaped, and do not conflict with Markdown syntax
     - Optionally emitting tables as sanitized HTML (``table_format`` option)
     """
+
+    options: Dict[str, Any]
 
     def __init__(self, **options: Any):
         options["heading_style"] = options.get("heading_style", markdownify.ATX)

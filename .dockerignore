@@ -1,2 +1,23 @@
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Allow-list: the image needs the package sources and the license files only.
 *
 !packages/
+!LICENSE
+!LICENSE-APACHE
+!NOTICE
+
+# Not needed to build or run the packages.
+packages/*/tests/
+packages/markitforge-ocr/
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/build/
+**/dist/
+**/.DS_Store

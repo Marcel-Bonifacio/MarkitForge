@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026-present MarkitForge contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build every package on a version tag (v0.2.0, ...) and publish to PyPI with
+# trusted publishing (no API token stored in GitHub).
+#
+# One-time setup, by the repository owner:
+#  1. Create the projects on PyPI (markitforge, markitforge-mcp, markitforge-gui,
+#     markitforge-ocr) or add them as "pending publishers".
+#  2. For each, add a trusted publisher: owner Marcel-Bonifacio, repo MarkitForge,
+#     workflow release.yml, environment pypi.
+#  3. In GitHub: Settings > Environments > New environment "pypi", and add
+#     yourself as a required reviewer so every publish waits for approval.
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # manual run: build and check only, never publishes
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Check tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          for about in packages/markitforge/src/markitforge packages/markitforge-mcp/src/markitforge_mcp packages/markitforge-gui/src/markitforge_gui packages/markitforge-ocr/src/markitforge_ocr; do
+            have=$(python -c "import re,pathlib,sys;print(re.search(r'\"(.+?)\"', pathlib.Path(sys.argv[1]).read_text()).group(1))" "$about/__about__.py")
+            test "$want" = "$have" || { echo "Tag $GITHUB_REF_NAME but $about is $have"; exit 1; }
+          done
+      - name: Build
+        run: |
+          pip install build
+          for p in markitforge markitforge-mcp markitforge-gui markitforge-ocr; do
+            python -m build --outdir dist "packages/$p"
+          done
+      - name: Check license files are inside every package
+        run: |
+          for w in dist/*.whl; do
+            unzip -l "$w" | grep -q 'licenses/LICENSE' || { echo "no license in $w"; exit 1; }
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    # Only tags publish; a manual run builds and checks without publishing.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

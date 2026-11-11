@@ -9,8 +9,10 @@ Generated from `markitforge/_formats.py` by `scripts/gen_formats_doc.py`. Run `m
 | PowerPoint | `.pptx` | `markitforge[pptx]` |  | Per-slide sections, notes, charts, tables. |
 | Excel | `.xlsx` | `markitforge[xlsx]` |  | Per-sheet sections; hidden sheets skipped by default. |
 | Excel 97-2003 | `.xls` | `markitforge[xls]` |  |  |
-| Legacy & OpenDocument | `.doc` `.rtf` `.odt` `.ott` `.wpd` `.ppt` `.odp` `.ods` | `markitforge[docx]` | soffice | Converted through LibreOffice (must be installed). |
+| Legacy & OpenDocument | `.doc` `.rtf` `.odt` `.ott` `.fodt` `.wpd` `.ppt` `.pps` `.odp` `.ods` `.xlsb` | `markitforge[docx]` | soffice | Converted through LibreOffice (must be installed), sandboxed. |
+| Apple iWork | `.pages` `.numbers` `.key` | `markitforge[docx]` | soffice | Through LibreOffice; falls back to the file's built-in preview. |
 | Outlook message | `.msg` | `markitforge[outlook]` |  |  |
+| Email | `.eml` | core |  | Headers, body and attachment list; convert_attachments=True converts them too. |
 | EPUB | `.epub` | core |  |  |
 | HTML | `.html` `.htm` | core |  | Wikipedia, Bing SERP and RSS pages get special handling. |
 | MHTML web archive | `.mht` `.mhtml` | core |  | Also OneNote / Word 'single file web page' exports. |

@@ -39,9 +39,9 @@ markitforge-mcp --http --host 127.0.0.1 --port 3001
 
 ## Running in Docker
 
-To run `markitforge-mcp` in Docker, build the Docker image using the provided Dockerfile:
+To run `markitforge-mcp` in Docker, build the Docker image from the repository root (so the core package comes from this checkout):
 ```bash
-docker build -t markitforge-mcp:latest .
+docker build -f packages/markitforge-mcp/Dockerfile -t markitforge-mcp:latest .
 ```
 
 And run it using:

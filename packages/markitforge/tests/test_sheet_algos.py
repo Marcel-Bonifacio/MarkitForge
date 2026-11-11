@@ -578,7 +578,7 @@ def test_docx_page_count_without_libreoffice_falls_back(
     data = (FILES / "mf_pages.docx").read_bytes()
     result = _docx(data, docx_page_count="libreoffice")
     assert result.metadata["page_count"] == len(result.pages) == 3
-    assert result.metadata["page_count_source"] == "stored_breaks"
+    assert result.metadata["page_count_source"] == "breaks"
     assert len(result.warnings) == 1 and "LibreOffice" in result.warnings[0]
     assert result.markdown == _docx(data).markdown
 

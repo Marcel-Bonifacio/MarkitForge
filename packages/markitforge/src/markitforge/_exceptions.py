@@ -92,3 +92,9 @@ class ResourceLimitException(MarkitForgeException):
     """Raised when a fetched resource exceeds a size or time limit."""
 
     pass
+
+
+class ConversionCancelled(MarkitForgeException):
+    """Raised when a caller cancels a conversion (see ``cancel_event``)."""
+
+    pass

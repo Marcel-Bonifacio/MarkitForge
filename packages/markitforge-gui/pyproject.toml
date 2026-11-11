@@ -24,7 +24,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
-  "markitforge[all]>=0.1.9,<0.2.0",
+  "markitforge[all]>=0.2.0,<0.3.0",
   "starlette>=0.47.2",  # CVE-2025-54121 (multipart upload DoS)
   "uvicorn>=0.30",
   "python-multipart>=0.0.18",  # CVE-2024-53981 (multipart parser DoS)
@@ -41,13 +41,13 @@ window = [
 test = [
   "pytest",
   "pytest-timeout",
-  "httpx",
+  "httpx2",
 ]
 
 [project.urls]
-Documentation = "https://github.com/microsoft/markitdown#readme"
-Issues = "https://github.com/microsoft/markitdown/issues"
-Source = "https://github.com/microsoft/markitdown"
+Documentation = "https://github.com/Marcel-Bonifacio/MarkitForge#readme"
+Issues = "https://github.com/Marcel-Bonifacio/MarkitForge/issues"
+Source = "https://github.com/Marcel-Bonifacio/MarkitForge"
 
 [tool.hatch.version]
 path = "src/markitforge_gui/__about__.py"

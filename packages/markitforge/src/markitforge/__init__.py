@@ -20,6 +20,7 @@ from ._base_converter import (
     parse_page_range,
 )
 from ._stream_info import StreamInfo
+from ._progress import ProgressEvent, report_progress, check_cancelled
 from ._net import BlockedURLException, check_public_url
 from ._exceptions import (
     MarkitForgeException,
@@ -28,6 +29,7 @@ from ._exceptions import (
     FileConversionException,
     UnsupportedFormatException,
     ResourceLimitException,
+    ConversionCancelled,
 )
 
 # Backward-compatible names for code written against upstream MarkItDown.
@@ -52,6 +54,10 @@ __all__ = [
     "FileConversionException",
     "UnsupportedFormatException",
     "ResourceLimitException",
+    "ConversionCancelled",
+    "ProgressEvent",
+    "report_progress",
+    "check_cancelled",
     "BlockedURLException",
     "check_public_url",
     "StreamInfo",

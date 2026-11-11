@@ -1073,9 +1073,11 @@ class TestScanDetection:
         result = _convert(GARBAGE)
         assert result.warnings == [
             "Page 1 has an unreadable text layer (garbled characters); it may "
-            "be a scan. Try the markitforge-ocr plugin.",
+            "be a scan. Use ocr_scanned_pages=True (CLI --ocr) or the "
+            "markitforge-ocr plugin.",
             "Page 2 has almost no text over a full-page image; it may be a "
-            "scan. Try the markitforge-ocr plugin.",
+            "scan. Use ocr_scanned_pages=True (CLI --ocr) or the "
+            "markitforge-ocr plugin.",
         ]
         assert "ordinary, readable text layer" in result.pages[2].markdown
 
@@ -1094,7 +1096,8 @@ class TestScanDetection:
     def test_merged_warnings(self):
         assert _garbled_warnings(list(range(1, 8))) == [
             "Pages 1-7 have unreadable text layers (garbled characters); they "
-            "may be scans. Try the markitforge-ocr plugin."
+            "may be scans. Use ocr_scanned_pages=True (CLI --ocr) or the "
+            "markitforge-ocr plugin."
         ]
         assert _sparse_warnings([]) == []
 

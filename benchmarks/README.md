@@ -25,6 +25,10 @@ python benchmarks/run_benchmark.py --engine markitdown  # score upstream MarkItD
 when one drops more than 0.02. Raise the baseline (`--update-baseline`) when a
 change makes things better, in the same pull request.
 
+## Real documents
+
+`--corpus DIR` scores your own documents against hand-written expectations instead of the built-in cases. See [corpus/README.md](corpus/README.md).
+
 ## Adding a case
 
 Add a `Case` to `CASES` with a `build(dir) -> path` function and the ground

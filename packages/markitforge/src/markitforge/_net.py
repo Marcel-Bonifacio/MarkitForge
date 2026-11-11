@@ -21,7 +21,7 @@ Resolver = Callable[[str, int], List[str]]
 
 def _resolve(host: str, port: int) -> List[str]:
     infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    return sorted({info[4][0] for info in infos})
+    return sorted({str(info[4][0]) for info in infos})
 
 
 def _is_public(ip: str) -> bool:

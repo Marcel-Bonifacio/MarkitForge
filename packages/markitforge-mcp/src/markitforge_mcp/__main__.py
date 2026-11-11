@@ -126,14 +126,35 @@ def _safe_name(name: str) -> str:
 # --- Conversion core ----------------------------------------------------------
 
 
+def _config():
+    """Limits from the user config file (see markitforge._config); cached.
+
+    A config file that is named but missing, or that cannot be used, is an
+    error: the limits in it must not be dropped silently.
+    """
+    global _CONFIG
+    if _CONFIG is None:
+        from markitforge._config import load_config
+
+        try:
+            _CONFIG = load_config()
+        except ValueError as exc:
+            raise ToolError(f"MarkitForge config error: {exc}") from exc
+    return _CONFIG
+
+
+_CONFIG = None
+
+
 def _convert_sync(uri: str, **options: Any):
     _check_file_access(uri)
-    converter = MarkitForge(
-        enable_plugins=check_plugins_enabled(),
-        block_private_networks=_block_private_urls,
-    )
+    config = _config()
+    instance = {**config.instance}
+    if _block_private_urls:
+        instance["block_private_networks"] = True
+    converter = MarkitForge(enable_plugins=check_plugins_enabled(), **instance)
     try:
-        return converter.convert_uri(uri, **options)
+        return converter.convert_uri(uri, **{**config.limits, **options})
 
     # SDK 2.x only exposes ToolError messages.
     except UnsupportedFormatException as exc:
@@ -349,6 +370,12 @@ def main():
     args = parser.parse_args()
 
     use_http = args.http or args.sse
+
+    try:
+        _config()
+    except ToolError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
     roots = list(args.allow_file_root) + _roots_from_env()
     configure_file_access(

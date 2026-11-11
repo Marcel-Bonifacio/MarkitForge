@@ -33,6 +33,7 @@ past its declared size or past the cap is cut off. A limit hit raises
 """
 
 import hashlib
+import re
 import io
 import warnings
 import zipfile
@@ -463,3 +464,196 @@ class CaptionCache:
         result = produce()
         self._captions[key] = result
         return result
+
+
+# ------------------------------------------------------------ image export
+
+#: Keyword argument that turns on image export (``extract_images``).
+EXTRACT_IMAGES_KWARG = "extract_images"
+
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_EXTENSION_OVERRIDES = {
+    "image/jpeg": ".jpeg",
+    "image/jpg": ".jpeg",
+    "image/pjpeg": ".jpeg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/x-ms-bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+    "image/x-emf": ".emf",
+    "image/emf": ".emf",
+    "image/x-wmf": ".wmf",
+    "image/wmf": ".wmf",
+    "image/heic": ".heic",
+}
+
+
+def wants_images(kwargs: Mapping[str, Any]) -> bool:
+    """Whether the caller asked for ``extract_images``."""
+    return bool(kwargs.get(EXTRACT_IMAGES_KWARG, False))
+
+
+def image_extension(mime_type: Optional[str], fallback: str = "") -> str:
+    """A file extension (with dot) for an image media type."""
+    mime = (mime_type or "").split(";")[0].strip().lower()
+    if mime in _EXTENSION_OVERRIDES:
+        return _EXTENSION_OVERRIDES[mime]
+    fallback = fallback.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,8}", fallback):
+        return fallback
+    import mimetypes
+
+    return mimetypes.guess_extension(mime) or ".bin"
+
+
+def safe_asset_name(name: str, default: str = "image") -> str:
+    """A file name without directories, spaces or other unsafe characters."""
+    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    base = _UNSAFE_NAME_CHARS.sub("_", base).strip("._-")
+    return base[:100] or default
+
+
+def _is_webp(data: bytes) -> bool:
+    return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+
+
+# Extension -> leading bytes of a real file of that type.
+_IMAGE_SIGNATURES: Dict[str, Tuple[bytes, ...]] = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".bmp": (b"BM",),
+    ".tiff": (b"II*\x00", b"MM\x00*"),
+}
+
+
+def checked_image_extension(
+    mime_type: Optional[str], data: bytes
+) -> Tuple[Optional[str], str]:
+    """(extension, "") for an image that is safe to write to disk, or
+    (None, reason) when it must be left out.
+
+    The extension always comes from the media type, never from a name in
+    the document. PNG, JPEG, GIF, WebP, BMP and TIFF content must start
+    with that format's signature; SVG is refused because it can carry
+    script; a media type that is not an image gets ``.bin``.
+    """
+    mime = (mime_type or "").split(";")[0].strip().lower()
+    if mime in _EXTENSION_OVERRIDES:
+        extension = _EXTENSION_OVERRIDES[mime]
+    elif mime.startswith("image/"):
+        import mimetypes
+
+        extension = mimetypes.guess_extension(mime) or ".bin"
+    else:
+        extension = ".bin"
+    if extension in (".svg", ".svgz"):
+        return None, "SVG images are not exported"
+    if extension == ".webp":
+        matches = _is_webp(data)
+    elif extension in _IMAGE_SIGNATURES:
+        matches = data.startswith(_IMAGE_SIGNATURES[extension])
+    else:
+        matches = True
+    if not matches:
+        return None, f"its content is not {mime} data"
+    return extension, ""
+
+
+def asset_file_name(name: str, extension: str, default: str = "image") -> str:
+    """A safe file name: the stem of ``name`` (without its own extension
+    or any other dot) plus ``extension``."""
+    base = safe_asset_name(name, default)
+    stem, dot, _ = base.rpartition(".")
+    if not dot or not stem:
+        stem = base
+    return stem.replace(".", "_") + extension
+
+
+class ImageAssets:
+    """The distinct images of one document, for the ``extract_images`` option.
+
+    Each distinct image (by the SHA-256 of its bytes) becomes one
+    :class:`~markitforge._base_converter.DocumentAsset` with a safe, unique
+    file name; :meth:`add` returns that name so the Markdown can reference
+    it as ``![alt](name)``. Repeats of an image return the first name.
+    """
+
+    def __init__(self) -> None:
+        from .._base_converter import DocumentAsset
+
+        self._asset_type = DocumentAsset
+        self.assets: List[Any] = []
+        self._by_hash: Dict[str, Optional[str]] = {}
+        #: One entry per image that was left out.
+        self.warnings: List[str] = []
+        self._names: set = set()
+        self._counters: Dict[str, int] = {}
+
+    def __len__(self) -> int:
+        return len(self.assets)
+
+    def __bool__(self) -> bool:
+        # An empty collection is still "image export is on".
+        return True
+
+    def _unique(self, name: str) -> str:
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            stem, ext = name, ""
+        candidate = name
+        n = 2
+        while candidate.lower() in self._names:
+            candidate = f"{stem}_{n}.{ext}" if ext else f"{stem}_{n}"
+            n += 1
+        self._names.add(candidate.lower())
+        return candidate
+
+    def add(
+        self,
+        data: bytes,
+        mime_type: Optional[str],
+        *,
+        prefix: str = "image",
+        name: Optional[str] = None,
+        page: Optional[int] = None,
+        description: Optional[str] = None,
+    ) -> Optional[str]:
+        """Record an image and return its asset name, or None when the
+        image is left out (see :func:`checked_image_extension`; the reason
+        is added to :attr:`warnings`).
+
+        Without ``name`` the asset is called ``<prefix><n><ext>``, numbered
+        per prefix (``image1.png``, ``slide3_img2.jpeg``). With ``name`` (the
+        image's own file name, say) that name is made safe and unique. The
+        extension always follows the media type.
+        """
+        key = hashlib.sha256(data).hexdigest()
+        if key in self._by_hash:
+            return self._by_hash[key]
+        extension, reason = checked_image_extension(mime_type, data)
+        if extension is None:
+            self._by_hash[key] = None
+            label = safe_asset_name(name or "", prefix)
+            self.warnings.append(f"Skipped image `{label}`: {reason}.")
+            return None
+        if name:
+            chosen = self._unique(asset_file_name(name, extension))
+        else:
+            count = self._counters.get(prefix, 0) + 1
+            self._counters[prefix] = count
+            chosen = self._unique(f"{safe_asset_name(prefix)}{count}{extension}")
+        self._by_hash[key] = chosen
+        self.assets.append(
+            self._asset_type(
+                name=chosen,
+                mime_type=mime_type or None,
+                data=data,
+                description=description or None,
+                page=page,
+            )
+        )
+        return chosen
