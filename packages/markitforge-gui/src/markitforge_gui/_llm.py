@@ -94,6 +94,9 @@ class LLMSettings:
         self._client_factory = client_factory
         base_url = cfg.get("base_url") if isinstance(cfg.get("base_url"), str) else None
         self.base_url = (base_url or DEFAULT_LOCAL_URL).rstrip("/")
+        # The key from the environment only goes to the service the config
+        # file names, or to OpenAI itself: never to an address typed later.
+        self._env_key_urls = {self.base_url, "https://api.openai.com/v1"}
         model = cfg.get("model") if isinstance(cfg.get("model"), str) else None
         self.model = model or DEFAULT_LOCAL_MODEL
         self.provider = "local" if is_loopback_url(self.base_url) else "openai"
@@ -107,9 +110,14 @@ class LLMSettings:
 
     # ---- key handling -----------------------------------------------------
 
-    def _env_key(self) -> Optional[str]:
+    def _raw_env_key(self) -> Optional[str]:
         value = os.environ.get(self.key_env)
         return value if value else None
+
+    def _env_key(self) -> Optional[str]:
+        if self.base_url not in self._env_key_urls:
+            return None
+        return self._raw_env_key()
 
     def _effective_key(self) -> Optional[str]:
         if self.provider == "local":
@@ -118,7 +126,7 @@ class LLMSettings:
 
     def scrub(self, text: str) -> str:
         """Remove any API key from a message before it leaves the server."""
-        for key in (self._api_key, self._env_key()):
+        for key in (self._api_key, self._raw_env_key()):
             if key and len(key) >= 4:
                 text = text.replace(key, "***")
         return text

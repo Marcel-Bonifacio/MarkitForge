@@ -967,3 +967,17 @@ def test_static_assets_have_no_external_urls() -> None:
         if path.suffix == ".html":
             assert "style=" not in text and "<script>" not in text
             assert " on" + "click=" not in text
+
+
+def test_env_api_key_is_not_sent_to_a_typed_address(monkeypatch) -> None:
+    from markitforge_gui._llm import LLMSettings
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env-123456")
+    settings = LLMSettings({"base_url": "https://llm.example.com/v1"})
+    assert settings._effective_key() == "sk-from-env-123456"
+    settings.update({"base_url": "http://other.example/v1"})
+    assert settings._effective_key() is None
+    assert settings.public()["key_set"] is False
+    assert "sk-from-env" not in settings.scrub("bad key sk-from-env-123456")
+    settings.update({"base_url": "https://api.openai.com/v1"})
+    assert settings._effective_key() == "sk-from-env-123456"
