@@ -143,9 +143,9 @@ class MhtmlConverter(DocumentConverter):
             name = _basename(location) if location else (content_id or "")
             if export is not None:
                 resources.append(resource)
-                exported[id(resource)] = export.add(
-                    data, content_type, name=name or None
-                )
+                asset_name = export.add(data, content_type, name=name or None)
+                if asset_name is not None:
+                    exported[id(resource)] = asset_name
             assets.append(
                 DocumentAsset(
                     name=name or f"image{len(assets) + 1}",
@@ -164,7 +164,8 @@ class MhtmlConverter(DocumentConverter):
                     markdown="",
                     metadata=self._metadata(message),
                     assets=assets,
-                    warnings=["The archive contains no HTML part."],
+                    warnings=["The archive contains no HTML part."]
+                    + (export.warnings if export is not None else []),
                 )
             html_part = message
 
@@ -173,6 +174,7 @@ class MhtmlConverter(DocumentConverter):
 
         warnings: List[str] = []
         if export is not None:
+            warnings.extend(export.warnings)
             if exported:
                 html = self._point_at_assets(
                     html, base, by_location, by_basename, by_cid, exported

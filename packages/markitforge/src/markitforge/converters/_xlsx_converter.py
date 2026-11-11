@@ -744,7 +744,7 @@ class XlsxConverter(DocumentConverter):
                         + "\n\n"
                     )
                 if images is not None and export is not None:
-                    names = [
+                    added = [
                         export.add(
                             data,
                             info.mimetype,
@@ -753,6 +753,7 @@ class XlsxConverter(DocumentConverter):
                         )
                         for data, info in images._sheets.get(str(s), [])
                     ]
+                    names = [name for name in added if name]
                     if names and not hooked:
                         chunk += (
                             "### Images in this sheet:\n\n"
@@ -792,7 +793,8 @@ class XlsxConverter(DocumentConverter):
             metadata=metadata,
             pages=sections,
             assets=export.assets if export is not None else [],
-            warnings=_hidden_sheet_warning(hidden, include_hidden),
+            warnings=_hidden_sheet_warning(hidden, include_hidden)
+            + (export.warnings if export is not None else []),
         )
 
     def _image_to_html(

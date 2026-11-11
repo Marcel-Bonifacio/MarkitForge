@@ -12,6 +12,7 @@ license = "MIT AND Apache-2.0"
 license-files = ["LICENSE", "LICENSE-APACHE", "NOTICE"]
 keywords = []
 authors = [
+  { name = "MarkitForge contributors" },
   { name = "Adam Fourney", email = "adamfo@microsoft.com" },
 ]
 classifiers = [

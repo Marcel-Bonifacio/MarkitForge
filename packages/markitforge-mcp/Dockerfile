@@ -13,9 +13,14 @@ RUN apt-get update \
         libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY . /app
+# Build from the repository root so the core package comes from this checkout,
+# never from PyPI:
+#   docker build -f packages/markitforge-mcp/Dockerfile -t markitforge-mcp .
+COPY packages/markitforge /app/packages/markitforge
+COPY packages/markitforge-mcp /app/packages/markitforge-mcp
+COPY LICENSE LICENSE-APACHE NOTICE /app/
 
-RUN pip install --no-cache-dir /app
+RUN pip install --no-cache-dir "/app/packages/markitforge[all]" /app/packages/markitforge-mcp
 
 WORKDIR /workdir
 

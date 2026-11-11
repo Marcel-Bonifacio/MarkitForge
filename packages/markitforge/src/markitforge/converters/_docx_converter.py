@@ -154,7 +154,12 @@ class _DocxImageHandler:
 
     @property
     def warnings(self) -> List[str]:
-        return self._warnings + self._captions.warnings + self._inline.warnings
+        return (
+            self._warnings
+            + self._captions.warnings
+            + self._inline.warnings
+            + (self._export.warnings if self._export is not None else [])
+        )
 
     @property
     def assets(self) -> List[DocumentAsset]:
@@ -207,8 +212,11 @@ class _DocxImageHandler:
         self._images[key] = entry
         if self._export is not None:
             # Parts with identical bytes share one asset (and one name).
-            entry.name = self._export.add(
-                data, content_type, prefix="image", description=image.alt_text
+            entry.name = (
+                self._export.add(
+                    data, content_type, prefix="image", description=image.alt_text
+                )
+                or entry.name
             )
         elif self._describe:
             self._described.append(

@@ -47,7 +47,7 @@ llm = [
 
 [project.urls]
 Documentation = "https://github.com/Marcel-Bonifacio/MarkitForge#readme"
-Issues = "https://github.com/microsoft/markitdown/issues"
+Issues = "https://github.com/Marcel-Bonifacio/MarkitForge/issues"
 Source = "https://github.com/Marcel-Bonifacio/MarkitForge"
 
 [tool.hatch.version]

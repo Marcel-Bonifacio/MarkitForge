@@ -118,6 +118,7 @@ from ..converter_utils.pdf._tables import (
     render_table,
 )
 from ..converter_utils.pdf._visual import (
+    DEFAULT_MAX_EXPORT_BYTES,
     DEFAULT_MAX_LLM_CALLS,
     DEFAULT_MAX_RENDER_PIXELS,
     RegionTooLarge,
@@ -669,6 +670,7 @@ class _Options:
     llm_model: Optional[str] = None
     llm_prompt: Optional[str] = None
     max_render_pixels: int = DEFAULT_MAX_RENDER_PIXELS
+    max_export_bytes: int = DEFAULT_MAX_EXPORT_BYTES
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
     max_pdf_pages: int = DEFAULT_MAX_PDF_PAGES
     reading_order: str = "xycut"
@@ -710,6 +712,9 @@ class _Options:
             llm_prompt=kwargs.get("llm_prompt"),
             max_render_pixels=_limit(
                 kwargs, "max_render_pixels", DEFAULT_MAX_RENDER_PIXELS
+            ),
+            max_export_bytes=_limit(
+                kwargs, "max_export_bytes", DEFAULT_MAX_EXPORT_BYTES
             ),
             max_llm_calls=_limit(kwargs, "max_llm_calls", DEFAULT_MAX_LLM_CALLS),
             max_pdf_pages=_limit(kwargs, "max_pdf_pages", DEFAULT_MAX_PDF_PAGES),
@@ -1228,6 +1233,7 @@ class PdfConverter(DocumentConverter):
             visual=VisualBudget(
                 max_llm_calls=opts.max_llm_calls,
                 max_render_pixels=opts.max_render_pixels,
+                max_export_bytes=opts.max_export_bytes,
                 on_llm_call=on_llm_call,
             )
         )

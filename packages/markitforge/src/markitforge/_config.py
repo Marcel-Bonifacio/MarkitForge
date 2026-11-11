@@ -67,6 +67,7 @@ LIMIT_KEYS = {
     "max_inline_bytes",
     "max_llm_calls",
     "max_render_pixels",
+    "max_export_bytes",
     "max_pdf_pages",
     "libreoffice_timeout",
 }
@@ -131,9 +132,16 @@ def _pick(section: Dict[str, Any], allowed: set, name: str) -> Dict[str, Any]:
 
 
 def load_config(path: Optional[os.PathLike] = None) -> Config:
-    """Read the config file. A missing file gives an empty Config."""
+    """Read the config file.
+
+    A missing file at the default location gives an empty Config; a missing
+    file named by ``path`` or MARKITFORGE_CONFIG raises ValueError.
+    """
+    explicit = bool(path) or bool(os.environ.get("MARKITFORGE_CONFIG"))
     p = Path(path).expanduser() if path else config_path()
     if not p.is_file():
+        if explicit:
+            raise ValueError(f"Config file not found: {p}")
         return Config(path=None)
     if tomllib is None:  # pragma: no cover - Python 3.10
         logger.warning("Config files need Python 3.11+ (tomllib); ignoring %s", p)
@@ -142,14 +150,24 @@ def load_config(path: Optional[os.PathLike] = None) -> Config:
         data = tomllib.loads(p.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"Could not read config file {p}: {exc}") from exc
-    limits_raw = dict(data.get("limits", {}))
+
+    def section(name: str) -> Dict[str, Any]:
+        value = data.get(name, {})
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"Config file {p}: [{name}] must be a table, "
+                f"not {type(value).__name__}."
+            )
+        return dict(value)
+
+    limits_raw = section("limits")
     instance = {
         k: limits_raw.pop(k) for k in list(limits_raw) if k in INSTANCE_LIMIT_KEYS
     }
     return Config(
         path=p,
-        defaults=_pick(dict(data.get("defaults", {})), DEFAULT_KEYS, "defaults"),
+        defaults=_pick(section("defaults"), DEFAULT_KEYS, "defaults"),
         limits=_pick(limits_raw, LIMIT_KEYS, "limits"),
         instance=instance,
-        llm=_pick(dict(data.get("llm", {})), LLM_KEYS, "llm"),
+        llm=_pick(section("llm"), LLM_KEYS, "llm"),
     )

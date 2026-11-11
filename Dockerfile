@@ -28,13 +28,11 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1
 RUN python -m venv /opt/venv
 COPY packages/markitforge /src/packages/markitforge
-COPY packages/markitforge-sample-plugin /src/packages/markitforge-sample-plugin
 # openai: client for the optional AI features (an OpenAI-compatible service
 # configured in config.toml, or typed into the GUI).
 RUN /opt/venv/bin/pip install \
         "/src/packages/markitforge[all]" \
-        /src/packages/markitforge-sample-plugin \
-        openai
+        openai==3.49.0
 
 FROM build-core AS build-gui
 COPY packages/markitforge-gui /src/packages/markitforge-gui

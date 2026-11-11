@@ -651,7 +651,7 @@
     let r;
     try { r = await api("DELETE", "/api/history"); } catch (_) { toast(OFFLINE_ERROR.error); return; }
     if (!r.ok) { toast(r.data.error || "Could not clear the history."); return; }
-    state.items = state.items.filter((i) => isBusy(i) && i.kind !== "history");
+    state.items = state.items.filter((i) => i.kind === "md" || (isBusy(i) && i.kind !== "history"));
     if (!findItem(state.selectedKey)) state.selectedKey = null;
     renderList();
     renderViewer();
@@ -1412,11 +1412,22 @@
     $("zip-btn").addEventListener("click", async (e) => {
       const zip = $("zip-btn");
       if (zip.getAttribute("aria-disabled") === "true") { e.preventDefault(); return; }
-      if (state.items.some((i) => i.savePending)) {
-        e.preventDefault();
-        await flushAll();
-        followLink(zip.href);
+      e.preventDefault();
+      if (state.items.some((i) => i.savePending)) await flushAll();
+      let res;
+      try { res = await fetch(zip.href); } catch (_) { toast(OFFLINE_ERROR.error); return; }
+      if (!res.ok) {
+        const data = await readJson(res);
+        toast(data.error || "Could not download the results.");
+        announce(data.error || "Could not download the results.");
+        return;
       }
+      const blobUrl = URL.createObjectURL(await res.blob());
+      const a = el("a", { href: blobUrl, download: "markitforge-results.zip", hidden: true });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
     });
 
     $("clear-btn").addEventListener("click", () => {

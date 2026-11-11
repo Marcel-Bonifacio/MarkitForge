@@ -81,7 +81,7 @@ from markitforge._config import Config, load_config
 
 from .__about__ import __version__
 from ._history import HistoryStore
-from ._jobs import Job, JobManager, TooManyJobs
+from ._jobs import FINISHED, Job, JobManager, TooManyJobs
 from ._llm import LLMSettings, LLMSettingsError
 from ._original import (
     MAX_ORIGINAL_BYTES,
@@ -689,6 +689,11 @@ def create_app(
     limiter_box: Dict[str, anyio.CapacityLimiter] = {}
     jobs = JobManager(workers, ttl=job_ttl, error_mapper=error_details)
     preview_lock = threading.Lock()
+    # More results than are kept could not be downloaded together afterwards.
+    max_folder_files = min(
+        MAX_FOLDER_FILES,
+        history.max_entries if history is not None else store.capacity,
+    )
 
     def converter() -> MarkitForge:
         conv = getattr(local, "converter", None)
@@ -870,7 +875,7 @@ def create_app(
                 "max_upload_bytes": max_upload_bytes,
                 "max_original_bytes": max_original_bytes,
                 "max_edit_bytes": MAX_EDIT_BYTES,
-                "max_folder_files": MAX_FOLDER_FILES,
+                "max_folder_files": max_folder_files,
                 "history_enabled": history is not None,
                 "private_urls_allowed": allow_private_urls,
                 "defaults": config_defaults,
@@ -944,6 +949,8 @@ def create_app(
                 if len(kept) > max_original_bytes:
                     kept = None
             remove_tmp()
+            if job.cancel_event.is_set():
+                raise ConversionCancelled("The conversion was cancelled.")
             return finish_sync(
                 original,
                 md_filename,
@@ -986,6 +993,8 @@ def create_app(
             result = url_converter().convert_uri(
                 url, max_download_bytes=download_cap, **with_job(kwargs, job)
             )
+            if job.cancel_event.is_set():
+                raise ConversionCancelled("The conversion was cancelled.")
             return finish_sync(
                 url,
                 _md_name_for_url(url, result.title),
@@ -999,7 +1008,11 @@ def create_app(
         job = jobs.get(request.path_params["job_id"])
         if job is None:
             return _error(404, "This conversion is no longer known. Please try again.")
-        return JSONResponse(job.to_dict())
+        data = job.to_dict()
+        if data["status"] in FINISHED:
+            # The page has the outcome now; do not keep a second copy around.
+            jobs.forget(job.id)
+        return JSONResponse(data)
 
     async def job_cancel(request: Request) -> Response:
         denied = check_client(request)
@@ -1119,10 +1132,22 @@ def create_app(
         ids_param = request.query_params.get("ids", "").strip()
         if ids_param:
             entries: List[StoredResult] = []
-            for item_id in ids_param.split(",")[:2000]:
+            ids = ids_param.split(",")
+            missing = max(0, len(ids) - 2000)
+            for item_id in ids[:2000]:
                 entry = await get_entry(item_id.strip())
                 if entry is not None:
                     entries.append(entry)
+                else:
+                    missing += 1
+            if missing:
+                return _error(
+                    409,
+                    "1 result is no longer available. Convert it again."
+                    if missing == 1
+                    else f"{missing} results are no longer available. "
+                    "Convert them again.",
+                )
         else:
             entries = store.all()
         if not entries:

@@ -169,6 +169,16 @@ class Slow(MarkitForge):
         return DocumentConverterResult(markdown="done")
 
 
+class Stubborn(Slow):
+    """Finishes the conversion even though it was cancelled."""
+
+    def convert_local(self, *args: Any, **kwargs: Any) -> DocumentConverterResult:
+        Slow.seen = kwargs
+        Slow.started.set()
+        Slow.proceed.wait(10)
+        return DocumentConverterResult(markdown="done")
+
+
 def _poll(
     c: TestClient, job_id: str, until: Any, timeout: float = 10
 ) -> Dict[str, Any]:
@@ -205,10 +215,12 @@ def test_job_progress_then_done() -> None:
         assert c.get(f"/api/download/{data['result']['id']}").text == "done"
 
 
-def test_job_cancel_running() -> None:
+@pytest.mark.parametrize("factory", [Slow, Stubborn])
+def test_job_cancel_running(factory: Any, tmp_path: Path) -> None:
     Slow.started.clear()
     Slow.proceed.clear()
-    with TC(create_app(converter_factory=Slow)) as c:
+    app = create_app(converter_factory=factory, history_dir=tmp_path / "history")
+    with TC(app) as c:
         job_id = upload(c, "a.pdf", data=b"%PDF-1.4", wait=False).json()["job_id"]
         assert Slow.started.wait(10)
         res = c.post(f"/api/jobs/{job_id}/cancel", headers=HEADERS)
@@ -219,6 +231,49 @@ def test_job_cancel_running() -> None:
         data = _poll(c, job_id, lambda d: d["status"] in ("cancelled", "done", "error"))
         assert data["status"] == "cancelled"
         assert "result" not in data
+        assert c.get("/api/history").json()["items"] == []
+        assert len(app.state.store) == 0
+        assert list((tmp_path / "history").iterdir()) == []
+
+
+def test_finished_job_is_released_after_fetch() -> None:
+    app = create_app(converter_factory=Tiny)
+    with TC(app) as c:
+        job_id = upload(c, "a.txt", data=b"x", wait=False).json()["job_id"]
+        data = _poll(c, job_id, lambda d: d["status"] == "done")
+        assert data["result"]["markdown"] == "# Tiny\n\nbody"
+        assert job_id not in app.state.jobs._jobs
+        assert len(app.state.jobs) == 0
+        assert c.get(f"/api/jobs/{job_id}").status_code == 404
+        # The result itself is still there.
+        assert c.get(f"/api/download/{data['result']['id']}").status_code == 200
+
+
+def test_job_workers_are_daemon_threads() -> None:
+    from markitforge_gui._jobs import JobManager, TooManyJobs
+
+    manager = JobManager(2)
+    assert len(manager._threads) == 2
+    assert all(t.daemon and t.is_alive() for t in manager._threads)
+    started, release, cleaned = threading.Event(), threading.Event(), []
+
+    def work(job: Any) -> Dict[str, Any]:
+        started.set()
+        release.wait(10)
+        return {}
+
+    busy = [manager.submit("busy", work) for _ in range(2)]
+    assert started.wait(10)
+    waiting = manager.submit("waiting", work, cleanup=lambda: cleaned.append(1))
+    manager.shutdown()  # returns at once, with jobs still running
+    assert waiting.status == "cancelled" and cleaned == [1]
+    assert all(job.cancel_event.is_set() for job in busy)
+    with pytest.raises(TooManyJobs):
+        manager.submit("late", work)
+    release.set()
+    for thread in manager._threads:
+        thread.join(10)
+        assert not thread.is_alive()
 
 
 def test_job_cancel_queued_cleans_temp_file(tmp_path: Path) -> None:
@@ -320,6 +375,17 @@ def test_history_file_modes_and_atomic(tmp_path: Path) -> None:
         assert stat.S_IMODE(hist.stat().st_mode) == 0o700
         assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
         assert stat.S_IMODE(files[0].stat().st_mode) == 0o600
+        # A folder that was already there keeps its permissions.
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        os.chmod(shared, 0o775)
+        HistoryStore(shared / "history")
+        assert stat.S_IMODE(shared.stat().st_mode) == 0o775
+        assert stat.S_IMODE((shared / "history").stat().st_mode) == 0o700
+        # The history folder itself is always made private.
+        os.chmod(shared / "history", 0o755)
+        HistoryStore(shared / "history")
+        assert stat.S_IMODE((shared / "history").stat().st_mode) == 0o700
     saved = json.loads(files[0].read_text())
     assert saved["markdown"] == "# Tiny\n\nbody"
     assert "options" not in saved and "llm" not in json.dumps(saved).lower()
@@ -730,6 +796,22 @@ def test_api_key_never_stored_or_echoed(tmp_path: Path) -> None:
             assert secret.encode() not in path.read_bytes()
 
 
+def test_api_key_cleared_when_base_url_changes(client: TestClient) -> None:
+    first = {"provider": "openai", "base_url": "https://api.one.example/v1"}
+    res = client.put("/api/llm", json={**first, "api_key": "sk-one"}, headers=HEADERS)
+    assert res.json()["key_source"] == "session"
+    # Same address again, or another setting: the key stays.
+    res = client.put("/api/llm", json={**first, "model": "m2"}, headers=HEADERS)
+    assert res.json()["key_set"] is True
+    # Another address without a new key: the old key is forgotten.
+    other = {"base_url": "https://api.two.example/v1"}
+    res = client.put("/api/llm", json=other, headers=HEADERS)
+    assert res.json()["key_set"] is False and res.json()["key_source"] is None
+    # Another address together with its own key: that key is used.
+    res = client.put("/api/llm", json={**first, "api_key": "sk-new"}, headers=HEADERS)
+    assert res.json()["key_source"] == "session"
+
+
 def test_llm_settings_validation(client: TestClient) -> None:
     for bad in (
         {"provider": "evil"},
@@ -867,6 +949,13 @@ def test_theme_switch_markup_and_script() -> None:
     assert "javascript" in js.headers["content-type"]
     assert ':root[data-theme="dark"]' in css
     assert ":root:not([data-theme])" in css
+
+
+def test_clear_history_keeps_opened_markdown_files() -> None:
+    with TC(create_app()) as c:
+        js = c.get("/static/app.js").text
+    clear = js.split("async function clearHistory()", 1)[1].split("\n  }\n", 1)[0]
+    assert 'i.kind === "md" ||' in clear
 
 
 def test_static_assets_have_no_external_urls() -> None:

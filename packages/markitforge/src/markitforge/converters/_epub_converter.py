@@ -186,7 +186,7 @@ class EpubConverter(HtmlConverter):
                 markdown="\n\n".join(markdown_content),
                 title=metadata["title"],
                 assets=export.assets if export is not None else [],
-                warnings=warnings,
+                warnings=warnings + (export.warnings if export is not None else []),
             )
 
     @staticmethod

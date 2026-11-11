@@ -63,6 +63,8 @@ RENDERS_PER_LLM_CALL = 4
 # Image export (extract_images) without an LLM renders at most this many
 # images per document (0 = unlimited).
 DEFAULT_MAX_EXPORT_RENDERS = 1000
+# ... and keeps at most this many bytes of them (0 = unlimited).
+DEFAULT_MAX_EXPORT_BYTES = 256 * 1024 * 1024
 
 FORMULA_PROMPT = (
     "Transcribe the mathematical formula in this image into LaTeX. "
@@ -96,6 +98,8 @@ class VisualBudget:
     # Image export without captions: renders done and their cap.
     max_export_renders: int = DEFAULT_MAX_EXPORT_RENDERS
     export_renders: int = 0
+    max_export_bytes: int = DEFAULT_MAX_EXPORT_BYTES
+    export_bytes: int = 0
     export_exhausted: bool = False
     # Called with the running count after every LLM call is granted.
     on_llm_call: Optional[Callable[[int], None]] = field(default=None, repr=False)
@@ -147,6 +151,21 @@ class VisualBudget:
             )
             return False
         self.export_renders += 1
+        return True
+
+    def can_keep_export(self, size: int, warnings: List[str]) -> bool:
+        """Count ``size`` exported bytes; False once their cap is passed."""
+        if self.export_exhausted:
+            return False
+        if self.max_export_bytes and self.export_bytes + size > self.max_export_bytes:
+            self.export_exhausted = True
+            warnings.append(
+                f"Stopped exporting images after {self.export_bytes} "
+                f"byte(s) (max_export_bytes={self.max_export_bytes}); "
+                "the remaining images were left out."
+            )
+            return False
+        self.export_bytes += size
         return True
 
 
@@ -439,6 +458,8 @@ def page_image_blocks(
             if key is not None:
                 budget.images[key] = (name, description)
             blocks.append(_image_block(bbox, name, description))
+            continue
+        if export and not budget.can_keep_export(len(png), warnings):
             continue
         caption = caption and budget.can_call_llm(warnings)
         if not caption and not export:

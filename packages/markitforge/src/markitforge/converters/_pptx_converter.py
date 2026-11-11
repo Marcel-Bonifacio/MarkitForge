@@ -241,7 +241,8 @@ class PptxConverter(DocumentConverter):
             metadata=metadata,
             pages=sections,
             assets=pictures.export.assets if pictures.export is not None else [],
-            warnings=pictures.warnings,
+            warnings=pictures.warnings
+            + (pictures.export.warnings if pictures.export is not None else []),
         )
 
     @staticmethod
@@ -374,7 +375,8 @@ class PptxConverter(DocumentConverter):
                 page=slide,
                 description=alt_text if alt_text != shape.name else None,
             )
-            return f"\n![{alt_text}]({name})\n"
+            if name is not None:
+                return f"\n![{alt_text}]({name})\n"
 
         if kwargs.get("keep_data_uris", False) and image_blob is not None:
             content_type = image_content_type or "image/png"

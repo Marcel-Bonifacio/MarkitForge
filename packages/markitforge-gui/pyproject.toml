@@ -41,13 +41,13 @@ window = [
 test = [
   "pytest",
   "pytest-timeout",
-  "httpx",
+  "httpx2",
 ]
 
 [project.urls]
-Documentation = "https://github.com/microsoft/markitdown#readme"
-Issues = "https://github.com/microsoft/markitdown/issues"
-Source = "https://github.com/microsoft/markitdown"
+Documentation = "https://github.com/Marcel-Bonifacio/MarkitForge#readme"
+Issues = "https://github.com/Marcel-Bonifacio/MarkitForge/issues"
+Source = "https://github.com/Marcel-Bonifacio/MarkitForge"
 
 [tool.hatch.version]
 path = "src/markitforge_gui/__about__.py"

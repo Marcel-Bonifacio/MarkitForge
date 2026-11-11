@@ -43,6 +43,14 @@ if TYPE_CHECKING:
     from .._markitforge import MarkitForge
 
 ACCEPTED_FILE_EXTENSIONS = [".eml"]
+# Web archives are MIME messages too (and Python maps .mhtml to
+# message/rfc822); MhtmlConverter handles them.
+MHTML_FILE_EXTENSIONS = [".mht", ".mhtml"]
+MHTML_MIME_TYPE_PREFIXES = [
+    "multipart/related",
+    "application/x-mimearchive",
+    "message/x-mimearchive",
+]
 ACCEPTED_MIME_TYPE_PREFIXES = ["message/rfc822"]
 
 #: Header table rows: (header, label).
@@ -107,7 +115,9 @@ def _payload_size(part: Message) -> int:
         return 0
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     if encoding == "base64":
-        return len(payload) * 3 // 4
+        text = payload.rstrip()
+        chars = len(text) - text.count("\n") - text.count("\r")
+        return max(0, chars * 3 // 4 - text[-2:].count("="))
     return len(payload)
 
 
@@ -170,9 +180,16 @@ def _table(header: List[str], rows: List[List[str]]) -> str:
 class _Leaf:
     """A non-multipart part (or an attached message) of the e-mail."""
 
-    def __init__(self, part: Message, *, alternative: bool, attached_message: bool):
+    def __init__(
+        self,
+        part: Message,
+        *,
+        alternative: Optional[Message],
+        attached_message: bool,
+    ):
         self.part = part
-        self.alternative = alternative
+        #: The enclosing multipart/alternative part, if any.
+        self.group = alternative
         self.attached_message = attached_message
         self.content_type = _content_type(part)
         self.name = _filename(part)
@@ -210,6 +227,10 @@ class EmlConverter(DocumentConverter):
         if extension in ACCEPTED_FILE_EXTENSIONS:
             return True
         mimetype = (stream_info.mimetype or "").lower()
+        if extension in MHTML_FILE_EXTENSIONS or any(
+            mimetype.startswith(prefix) for prefix in MHTML_MIME_TYPE_PREFIXES
+        ):
+            return False
         return any(
             mimetype.startswith(prefix) for prefix in ACCEPTED_MIME_TYPE_PREFIXES
         )
@@ -221,7 +242,9 @@ class EmlConverter(DocumentConverter):
         count = 0
         truncated = False
 
-        def walk(part: Message, depth: int, alternative: bool) -> Iterator[_Leaf]:
+        def walk(
+            part: Message, depth: int, alternative: Optional[Message]
+        ) -> Iterator[_Leaf]:
             nonlocal count, truncated
             count += 1
             if count > MAX_PARTS:
@@ -231,7 +254,7 @@ class EmlConverter(DocumentConverter):
             if content_type == "message/rfc822" or (
                 part is not message and content_type.startswith("message/")
             ):
-                yield _Leaf(part, alternative=False, attached_message=True)
+                yield _Leaf(part, alternative=None, attached_message=True)
                 return
             if part.is_multipart():
                 if depth >= MAX_PART_DEPTH:
@@ -240,14 +263,21 @@ class EmlConverter(DocumentConverter):
                 children = part.get_payload()
                 if not isinstance(children, list):
                     return
-                inner_alternative = content_type == "multipart/alternative"
+                # A multipart/related inside an alternative is still one of
+                # its versions; anything else starts afresh.
+                if content_type == "multipart/alternative":
+                    inner: Optional[Message] = part
+                elif content_type == "multipart/related":
+                    inner = alternative
+                else:
+                    inner = None
                 for child in children:
                     if isinstance(child, Message):
-                        yield from walk(child, depth + 1, inner_alternative)
+                        yield from walk(child, depth + 1, inner)
                 return
             yield _Leaf(part, alternative=alternative, attached_message=False)
 
-        leaves.extend(walk(message, 0, False))
+        leaves.extend(walk(message, 0, None))
         if truncated:
             warnings.append(
                 f"The message has more than {MAX_PARTS} MIME parts or nests them "
@@ -300,34 +330,46 @@ class EmlConverter(DocumentConverter):
         warnings: List[str],
         kwargs: Dict[str, Any],
     ) -> tuple:
-        """(Markdown of the body, the leaves used as body)."""
+        """(Markdown of the body, the leaves used as body).
+
+        Every inline, unnamed text part is body text, in document order.
+        The versions inside one multipart/alternative are the same text,
+        so only one of them is shown: the HTML one when there is one.
+        """
         candidates = [leaf for leaf in leaves if leaf.is_body_candidate]
-        html_leaf = next((c for c in candidates if c.content_type == "text/html"), None)
-        text_leaf = next(
-            (c for c in candidates if c.content_type == "text/plain"), None
-        )
-        chosen = html_leaf or text_leaf
-        if chosen is None:
-            return "", []
-        used = [chosen]
-        # The other half of a multipart/alternative pair is the same text.
-        other = text_leaf if chosen is html_leaf else html_leaf
-        if other is not None and other.alternative and chosen.alternative:
-            used.append(other)
-        data = self._decoded(chosen, max_bytes, warnings)
-        if data is None:
-            return "", used
-        text = _decode_text(chosen.part, data)
-        if chosen is html_leaf:
-            html_kwargs = {
-                k: v
-                for k, v in kwargs.items()
-                if k not in ("convert_attachments", BUDGET_KWARG)
-            }
-            markdown = self._html_converter.convert_string(text, **html_kwargs).markdown
-        else:
-            markdown = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-        return markdown.strip(), used
+        chosen: List[_Leaf] = []
+        seen_groups: List[Message] = []
+        for leaf in candidates:
+            if leaf.group is None:
+                chosen.append(leaf)
+                continue
+            if any(leaf.group is group for group in seen_groups):
+                continue
+            seen_groups.append(leaf.group)
+            versions = [c for c in candidates if c.group is leaf.group]
+            chosen.append(
+                next((c for c in versions if c.content_type == "text/html"), leaf)
+            )
+        html_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k not in ("convert_attachments", BUDGET_KWARG)
+        }
+        pieces: List[str] = []
+        for leaf in chosen:
+            data = self._decoded(leaf, max_bytes, warnings)
+            if data is None:
+                continue
+            text = _decode_text(leaf.part, data)
+            if leaf.content_type == "text/html":
+                markdown = self._html_converter.convert_string(
+                    text, **html_kwargs
+                ).markdown
+            else:
+                markdown = text.replace("\r\n", "\n").replace("\r", "\n")
+            if markdown.strip():
+                pieces.append(markdown.strip())
+        return "\n\n".join(pieces), candidates
 
     @staticmethod
     def _header_table(headers: Dict[str, str]) -> str:
@@ -374,8 +416,6 @@ class EmlConverter(DocumentConverter):
         for leaf in leaves:
             if any(leaf is u for u in used):
                 continue
-            if leaf.is_body_candidate and leaf.alternative:
-                continue  # an unused alternative of the body
             name = leaf.name
             if not name and leaf.attached_message:
                 inner = leaf.part.get_payload()
@@ -386,15 +426,11 @@ class EmlConverter(DocumentConverter):
             if not name:
                 name = f"part{len(attachments) + 1}"
             size = _payload_size(leaf.part)
-            try:
-                if leaf.attached_message:
+            if leaf.attached_message:
+                try:
                     size = len(leaf.part.as_bytes())
-                elif size <= max_part:
-                    decoded = leaf.part.get_payload(decode=True)
-                    if isinstance(decoded, bytes):
-                        size = len(decoded)
-            except Exception:
-                pass
+                except Exception:
+                    pass
             attachments.append(
                 {"name": name, "type": leaf.content_type, "size": int(size)}
             )

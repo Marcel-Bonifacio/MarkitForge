@@ -8,6 +8,7 @@ from enum import Enum
 from .._base_converter import DocumentConverter, DocumentConverterResult
 from .._stream_info import StreamInfo
 from .._exceptions import MissingDependencyException
+from ..converter_utils._yaml import yaml_scalar as _yaml_scalar
 from .. import __version__ as _markitforge_version
 
 _USER_AGENT = f"markitforge-docintel/{_markitforge_version}"
@@ -194,48 +195,6 @@ def _field_value(field: Any) -> Any:
 
     # Last resort: the raw extracted text.
     return getattr(field, "content", None)
-
-
-def _yaml_scalar(value: Any) -> str:
-    """Render a scalar value as a YAML string."""
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        rendered = repr(value)
-        if isinstance(value, float) and "e" in rendered:
-            mantissa, exponent = rendered.split("e", 1)
-            # YAML 1.1 requires a decimal point in exponential float mantissas.
-            if "." not in mantissa:
-                mantissa += ".0"
-            rendered = f"{mantissa}e{exponent}"
-        return rendered
-    s = str(value)
-    # Quote when necessary: contains special chars, leading/trailing whitespace,
-    # or characters that would confuse a YAML parser.
-    if (
-        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9 _./-]*", s)
-        or s != s.strip()
-        or s.lower() in ("null", "true", "false", "yes", "no", "on", "off", "y", "n")
-    ):
-        # Escape backslashes, double quotes, and common whitespace characters.
-        escaped = (
-            s.replace("\\", "\\\\")
-            .replace('"', '\\"')
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
-        )
-        # Quoting alone does not make YAML control characters valid. Escape
-        # those too, including Unicode line breaks that YAML would normalize.
-        escaped = re.sub(
-            r"[\x00-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]",
-            lambda match: f"\\u{ord(match.group()):04x}",
-            escaped,
-        )
-        return f'"{escaped}"'
-    return s
 
 
 def _yaml_dump(value: Any, indent: int = 0) -> str:

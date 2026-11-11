@@ -132,7 +132,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install packages
-        run: pip install "./packages/markitforge[all]" ./packages/markitforge-gui pytest pytest-timeout
+        run: pip install "./packages/markitforge[all]" "./packages/markitforge-gui[test]"
 
       - name: Run tests
         working-directory: packages/markitforge-gui

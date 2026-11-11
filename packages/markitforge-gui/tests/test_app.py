@@ -352,6 +352,28 @@ def test_store_is_capped() -> None:
     assert len(app.state.store) == 3
 
 
+def test_zip_reports_results_that_are_gone(tmp_path: Path) -> None:
+    app = create_app(converter_factory=MarkitForge, store_capacity=3)
+    with TC(app) as c:
+        assert c.get("/api/info").json()["max_folder_files"] == 3
+        ids = [upload(c, f"f{i}.txt", data=b"x").json()["id"] for i in range(5)]
+        res = c.get("/api/zip?ids=" + ",".join(ids))
+        assert res.status_code == 409
+        assert res.json()["error"] == (
+            "2 results are no longer available. Convert them again."
+        )
+        res = c.get("/api/zip?ids=" + ",".join(ids[1:]))
+        assert res.status_code == 409
+        assert res.json()["error"].startswith("1 result is no longer available.")
+        res = c.get("/api/zip?ids=" + ",".join(ids[2:]))
+        assert res.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(res.content)) as zf:
+            assert len(zf.namelist()) == 3
+    hist = create_app(history_dir=tmp_path / "h", history_max_entries=7)
+    with TC(hist) as c:
+        assert c.get("/api/info").json()["max_folder_files"] == 7
+
+
 def test_download_unknown(client: TestClient) -> None:
     res = client.get("/api/download/does-not-exist")
     assert res.status_code == 404

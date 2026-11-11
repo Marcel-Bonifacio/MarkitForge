@@ -11,7 +11,6 @@
 # Not needed to build or run the packages.
 packages/*/tests/
 packages/markitforge-ocr/
-packages/markitforge-mcp/
 **/__pycache__/
 **/*.py[cod]
 **/.venv/

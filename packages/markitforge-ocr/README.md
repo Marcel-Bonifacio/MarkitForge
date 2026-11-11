@@ -33,7 +33,7 @@ pip install openai
 ### Command Line
 
 ```bash
-markitforge document.pdf --use-plugins --llm-client openai --llm-model gpt-4o
+markitforge document.pdf --use-plugins --llm-model gpt-4o
 ```
 
 ### Python API

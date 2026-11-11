@@ -290,8 +290,9 @@ offline.
 
 MarkitForge is also built as a desktop app that needs no Python install:
 `MarkitForge-<version>-macos-arm64.dmg` (Apple Silicon, macOS 14 or newer) and
-`MarkitForge-<version>-windows-x64.zip`, attached to each
-[GitHub Release](https://github.com/Marcel-Bonifacio/MarkitForge/releases).
+`MarkitForge-<version>-windows-x64.zip`. The release workflow builds both;
+until releases are published and signed, build them yourself (see
+[packaging/](../../packaging/)).
 
 - **macOS:** open the `.dmg` and drag MarkitForge to Applications. The app is
   not notarized yet, so the first time right-click it, choose **Open** and

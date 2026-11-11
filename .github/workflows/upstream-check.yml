@@ -28,6 +28,8 @@ jobs:
           {
             echo '## Upstream MarkItDown'
             echo '```'
-            python scripts/sync_upstream.py --fetch --dry-run || true
+            python scripts/sync_upstream.py --fetch --dry-run 2>&1 || code=$?
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # 0 = up to date, 1 = upstream has new commits; anything else is a failure.
+          test "${code:-0}" -le 1

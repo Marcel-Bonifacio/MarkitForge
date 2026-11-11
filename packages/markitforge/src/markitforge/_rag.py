@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
+from .converter_utils._archive_limits import (
+    asset_file_name,
+    checked_image_extension,
+    safe_asset_name,
+)
+from .converter_utils._yaml import escape_yaml_controls
+
 if TYPE_CHECKING:  # pragma: no cover
     from ._base_converter import DocumentConverterResult
 
@@ -42,7 +49,7 @@ def estimate_tokens(text: str) -> int:
 def _yaml_scalar(value: Any) -> str:
     # JSON scalars are valid YAML; quoting every string avoids YAML gotchas
     # ("no" -> false, "1e3" -> number, ": " in titles, ...).
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return escape_yaml_controls(json.dumps(value, ensure_ascii=False, default=str))
 
 
 def _yaml_lines(key: str, value: Any, indent: int = 0) -> List[str]:
@@ -86,12 +93,6 @@ def front_matter(
 # ----------------------------------------------------------------- assets ---
 
 
-def safe_asset_name(name: str, fallback: str = "asset") -> str:
-    base = os.path.basename((name or "").replace("\\", "/"))
-    base = _SAFE_NAME_RE.sub("_", base).strip("._") or fallback
-    return base[:120]
-
-
 def rewrite_asset_links(markdown: str, mapping: Dict[str, str]) -> str:
     """Point ``![alt](name)`` image links at new paths (``mapping[name]``)."""
     if not mapping:
@@ -115,6 +116,9 @@ def save_assets(
 
     Never follows symlinks and never writes outside ``directory``. Existing
     regular files with the same name are replaced atomically (re-runs).
+    File extensions follow the asset's media type, not its name; an asset
+    whose bytes are not that kind of image, or an SVG, is left out with a
+    warning on the result.
     The returned targets are ``link_prefix/<file>`` (or just ``<file>``), ready
     for :func:`rewrite_asset_links`.
     """
@@ -128,8 +132,13 @@ def save_assets(
     if out_dir.is_symlink():
         raise ValueError(f"Refusing to write assets into a symlink: {out_dir}")
     for asset in assets:
-        name = safe_asset_name(asset.name)
-        stem, ext = os.path.splitext(name)
+        ext, reason = checked_image_extension(asset.mime_type, asset.data)  # type: ignore[arg-type]
+        if ext is None:
+            label = safe_asset_name(asset.name, "asset")
+            result.warnings.append(f"Did not save asset `{label}`: {reason}.")
+            continue
+        name = asset_file_name(asset.name, ext, "asset")
+        stem = name[: -len(ext)]
         n = 2
         while name in used:
             name = f"{stem}-{n}{ext}"
@@ -257,8 +266,17 @@ def _split_long(text: str, max_tokens: int) -> List[str]:
             out.append(buf)
             buf = ""
         if estimate_tokens(part) > max_tokens:
-            width = max_tokens * 4
-            out += [part[i : i + width] for i in range(0, len(part), width)]
+            start = 0
+            while start < len(part):
+                # ~4 characters per token, less for dense scripts such as CJK.
+                width = max_tokens * 4
+                while (
+                    width > 1
+                    and estimate_tokens(part[start : start + width]) > max_tokens
+                ):
+                    width //= 2
+                out.append(part[start : start + width])
+                start += width
             continue
         buf += part if not buf or buf.endswith("\n") else " " + part
     if buf:
@@ -340,6 +358,8 @@ def chunk_result(
                 emit()
                 if starts_section:
                     cur, cur_tokens = [], 0  # no overlap across sections
+                elif cur and cur_tokens + t > max_tokens:
+                    cur, cur_tokens = [], 0  # the overlap would not fit
             cur.append(b)
             cur_tokens += t
     emit()

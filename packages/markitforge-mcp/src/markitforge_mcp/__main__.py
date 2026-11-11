@@ -127,16 +127,19 @@ def _safe_name(name: str) -> str:
 
 
 def _config():
-    """Limits from the user config file (see markitforge._config); cached."""
+    """Limits from the user config file (see markitforge._config); cached.
+
+    A config file that is named but missing, or that cannot be used, is an
+    error: the limits in it must not be dropped silently.
+    """
     global _CONFIG
     if _CONFIG is None:
-        from markitforge._config import Config, load_config
+        from markitforge._config import load_config
 
         try:
             _CONFIG = load_config()
         except ValueError as exc:
-            logger.warning("Ignoring config file: %s", exc)
-            _CONFIG = Config()
+            raise ToolError(f"MarkitForge config error: {exc}") from exc
     return _CONFIG
 
 
@@ -367,6 +370,12 @@ def main():
     args = parser.parse_args()
 
     use_http = args.http or args.sse
+
+    try:
+        _config()
+    except ToolError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
 
     roots = list(args.allow_file_root) + _roots_from_env()
     configure_file_access(

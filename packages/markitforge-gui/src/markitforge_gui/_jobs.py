@@ -8,13 +8,15 @@
 once; the page polls ``GET /api/jobs/{id}``. Each job owns a
 ``threading.Event`` that is passed to the converter as ``cancel_event``, and a
 ``progress`` callback that records the latest :class:`ProgressEvent`.
-Finished jobs are forgotten after ``ttl`` seconds.
+A finished job is forgotten once the page has fetched its outcome, or after
+``ttl`` seconds. Workers are daemon threads, so a running conversion never
+keeps the program alive after Ctrl+C.
 """
 
 import logging
+import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -55,7 +57,6 @@ class Job:
     error: Optional[Dict[str, Any]] = None
     http_status: Optional[int] = None
     cleanup: List[Callable[[], None]] = field(default_factory=list)
-    future: Optional["Future[Any]"] = None
 
     def on_progress(self, event: ProgressEvent) -> None:
         data = event.to_dict()
@@ -81,7 +82,7 @@ class Job:
 
 
 class JobManager:
-    """Runs jobs on a thread pool and remembers them for a while."""
+    """Runs jobs on daemon worker threads and remembers them for a while."""
 
     def __init__(
         self,
@@ -95,12 +96,26 @@ class JobManager:
     ) -> None:
         self.ttl = ttl
         self.max_jobs = max_jobs
-        self._executor = ThreadPoolExecutor(
-            max_workers=max(1, workers), thread_name_prefix="markitforge-job"
-        )
         self._jobs: Dict[str, Job] = {}
         self._lock = threading.Lock()
         self._error_mapper = error_mapper
+        self._closed = False
+        self._queue: "queue.SimpleQueue[Any]" = queue.SimpleQueue()
+        self._threads = [
+            threading.Thread(
+                target=self._worker, name=f"markitforge-job_{i}", daemon=True
+            )
+            for i in range(max(1, workers))
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            self._run(*item)
 
     def submit(
         self,
@@ -113,12 +128,6 @@ class JobManager:
         job = Job(id=new_id(), name=name[:500])
         if cleanup is not None:
             job.cleanup.append(cleanup)
-        with self._lock:
-            active = sum(1 for j in self._jobs.values() if j.status not in FINISHED)
-            if active >= self.max_jobs:
-                self._run_cleanup(job)
-                raise TooManyJobs()
-            self._jobs[job.id] = job
         job.progress = {
             "stage": "queued",
             "current": 0,
@@ -126,13 +135,15 @@ class JobManager:
             "fraction": None,
             "message": None,
         }
-        try:
-            job.future = self._executor.submit(self._run, job, work)
-        except RuntimeError:  # shutting down
-            with self._lock:
-                self._jobs.pop(job.id, None)
+        with self._lock:
+            active = sum(1 for j in self._jobs.values() if j.status not in FINISHED)
+            accepted = not self._closed and active < self.max_jobs
+            if accepted:
+                self._jobs[job.id] = job
+                self._queue.put((job, work))
+        if not accepted:
             self._run_cleanup(job)
-            raise TooManyJobs() from None
+            raise TooManyJobs()
         return job
 
     def _run_cleanup(self, job: Job) -> None:
@@ -215,6 +226,13 @@ class JobManager:
             self._finish(job, "cancelled")
         return job
 
+    def forget(self, job_id: str) -> None:
+        """Drop a finished job (and its result payload) right away."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None and job.status in FINISHED:
+                del self._jobs[job_id]
+
     def prune(self) -> None:
         now = time.time()
         with self._lock:
@@ -231,10 +249,18 @@ class JobManager:
 
     def shutdown(self) -> None:
         with self._lock:
+            self._closed = True
             jobs = list(self._jobs.values())
         for job in jobs:
             job.cancel_event.set()
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        for job in jobs:
-            if job.future is not None and job.future.cancelled():
-                self._run_cleanup(job)
+        # Jobs that never started: clean up here. Running ones stop on their own.
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                self._run_cleanup(item[0])
+                self._finish(item[0], "cancelled")
+        for _ in self._threads:
+            self._queue.put(None)

@@ -62,10 +62,13 @@ def default_data_dir() -> Path:
     return Path(base) / "markitforge"
 
 
-def _private_dir(path: Path) -> None:
+def _private_dir(path: Path, *, only_if_new: bool = False) -> None:
+    existed = path.is_dir()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.is_symlink() or not path.is_dir():
         raise OSError(f"Refusing to use {path}: not a plain directory.")
+    if existed and only_if_new:
+        return  # someone else's folder: leave its permissions alone
     try:
         os.chmod(path, 0o700)
     except OSError:  # e.g. some network or Windows file systems
@@ -138,7 +141,7 @@ class HistoryStore:
         self.max_entry_bytes = max(1, max_entry_bytes)
         self._lock = threading.Lock()
         self._index: Dict[str, HistorySummary] = {}
-        _private_dir(self.dir.parent)
+        _private_dir(self.dir.parent, only_if_new=True)
         _private_dir(self.dir)
         self._scan()
 

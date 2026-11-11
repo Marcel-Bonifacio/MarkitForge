@@ -835,10 +835,14 @@ def test_mhtml_extract_images() -> None:
 
 def test_image_assets_names_are_safe_and_unique() -> None:
     assets = ImageAssets()
-    assert assets.add(b"1", "image/png", name="../../etc/pass wd.png") == "pass_wd.png"
-    assert assets.add(b"2", "image/png", name="pass wd.png") == "pass_wd_2.png"
-    assert assets.add(b"1", "image/png", name="other.png") == "pass_wd.png"
-    assert assets.add(b"3", "image/jpeg") == "image1.jpeg"
+    png, jpeg = b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"
+    assert (
+        assets.add(png + b"1", "image/png", name="../../etc/pass wd.png")
+        == "pass_wd.png"
+    )
+    assert assets.add(png + b"2", "image/png", name="pass wd.png") == "pass_wd_2.png"
+    assert assets.add(png + b"1", "image/png", name="other.png") == "pass_wd.png"
+    assert assets.add(jpeg + b"3", "image/jpeg") == "image1.jpeg"
     assert assets.add(b"4", None, name="...") == "image.bin"
     assert len(assets) == 4
 

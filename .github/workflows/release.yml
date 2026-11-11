@@ -15,12 +15,7 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: "Publish to PyPI (otherwise build only)"
-        type: boolean
-        default: false
+  workflow_dispatch: # manual run: build and check only, never publishes
 
 permissions:
   contents: read
@@ -30,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -37,8 +34,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           want="${GITHUB_REF_NAME#v}"
-          have=$(python -c "import re,pathlib;print(re.search(r'\"(.+?)\"', pathlib.Path('packages/markitforge/src/markitforge/__about__.py').read_text()).group(1))")
-          test "$want" = "$have" || { echo "Tag $GITHUB_REF_NAME but version is $have"; exit 1; }
+          for about in packages/markitforge/src/markitforge packages/markitforge-mcp/src/markitforge_mcp packages/markitforge-gui/src/markitforge_gui packages/markitforge-ocr/src/markitforge_ocr; do
+            have=$(python -c "import re,pathlib,sys;print(re.search(r'\"(.+?)\"', pathlib.Path(sys.argv[1]).read_text()).group(1))" "$about/__about__.py")
+            test "$want" = "$have" || { echo "Tag $GITHUB_REF_NAME but $about is $have"; exit 1; }
+          done
       - name: Build
         run: |
           pip install build
@@ -57,7 +56,8 @@ jobs:
 
   publish:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    # Only tags publish; a manual run builds and checks without publishing.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

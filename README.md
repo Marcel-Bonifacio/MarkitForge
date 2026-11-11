@@ -514,7 +514,7 @@ docker run --rm -i markitforge:latest < ~/your-file.pdf > output.md
 
 Before starting significant work, please read [What to Contribute](#what-to-contribute), which describes what is in and out of scope for this repository.
 
-Contributions are welcome. Open an issue first for big changes. By contributing you agree your work is released under the MIT license.
+Contributions are welcome. Open an issue first for big changes. By contributing you agree your work is released under the Apache License 2.0 (see [NOTICE](NOTICE)).
 
 Fixes that are not MarkitForge-specific are best sent upstream to [microsoft/markitdown](https://github.com/microsoft/markitdown) too.
 
@@ -553,16 +553,7 @@ See `packages/markitforge-sample-plugin` to get started, and tag your repository
 
 ### How to Contribute
 
-You can help by looking at issues or helping review PRs. We have also marked some issues as 'open for contribution' and PRs as 'open for reviewing' to help facilitate community contributions. These labels are suggestions; contributions within the scope described above are welcome.
-
-<div align="center">
-
-|            | All                                                          | Especially Needs Help from Community                                                                                                      |
-| ---------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **Issues** | [All Issues](https://github.com/microsoft/markitdown/issues) | [Issues open for contribution](https://github.com/microsoft/markitdown/issues?q=is%3Aissue+is%3Aopen+label%3A%22open+for+contribution%22) |
-| **PRs**    | [All PRs](https://github.com/microsoft/markitdown/pulls)     | [PRs open for reviewing](https://github.com/microsoft/markitdown/pulls?q=is%3Apr+is%3Aopen+label%3A%22open+for+reviewing%22)              |
-
-</div>
+You can help by looking at [issues](https://github.com/Marcel-Bonifacio/MarkitForge/issues) or reviewing [pull requests](https://github.com/Marcel-Bonifacio/MarkitForge/pulls). Contributions within the scope described above are welcome.
 
 ### Running Tests and Checks
 
@@ -577,13 +568,6 @@ You can help by looking at issues or helping review PRs. We have also marked som
   ```sh
   pip install hatch  # Other ways of installing hatch: https://hatch.pypa.io/dev/install/
   hatch shell
-  hatch test
-  ```
-
-  (Alternative) Use the Devcontainer which has all the dependencies installed:
-
-  ```sh
-  # Reopen the project in Devcontainer and run:
   hatch test
   ```
 

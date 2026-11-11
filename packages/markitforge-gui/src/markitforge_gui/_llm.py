@@ -163,6 +163,7 @@ class LLMSettings:
                     "That API key contains characters keys never have."
                 )
         with self._lock:
+            url_changed = base_url != self.base_url
             self.provider = provider
             self.base_url = base_url
             self.model = model
@@ -170,6 +171,9 @@ class LLMSettings:
                 self._api_key = None
             elif new_key:
                 self._api_key = new_key
+            elif url_changed:
+                # Never send a key typed for one service to another one.
+                self._api_key = None
 
     # ---- clients ----------------------------------------------------------
 

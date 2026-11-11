@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -29,11 +30,16 @@ from markitforge._config import Config, load_config
 from markitforge._rag import chunk_result, estimate_tokens, rewrite_asset_links
 
 FILES = Path(__file__).parent / "test_files"
+PNG = b"\x89PNG\r\n\x1a\n"
+
+# An empty config file, so the CLI never reads the user's own.
+EMPTY_CONFIG = Path(tempfile.mkdtemp(prefix="mf-config-")) / "config.toml"
+EMPTY_CONFIG.write_text("")
 
 
 def run(*args, env=None):
     e = dict(os.environ)
-    e["MARKITFORGE_CONFIG"] = str(Path(__file__).parent / "no-such-config.toml")
+    e["MARKITFORGE_CONFIG"] = str(EMPTY_CONFIG)
     e.update(env or {})
     return subprocess.run(
         [sys.executable, "-m", "markitforge", *map(str, args)],
@@ -61,8 +67,12 @@ def test_config_sections_and_unknown_keys(tmp_path, caplog):
     assert "nope" in caplog.text
 
 
-def test_missing_config_is_empty(tmp_path):
-    c = load_config(tmp_path / "missing.toml")
+def test_missing_config_is_empty(tmp_path, monkeypatch):
+    # Only the default location may be missing.
+    monkeypatch.delenv("MARKITFORGE_CONFIG", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    c = load_config()
     assert c.path is None and c.conversion_kwargs() == {}
 
 
@@ -200,8 +210,8 @@ def test_save_assets_safe_names_and_links(tmp_path):
         "![a](img.png) ![b](../../evil.png) ![c](other.png)",
         pages=[DocumentSection(1, "![a](img.png)")],
         assets=[
-            DocumentAsset("img.png", "image/png", b"1"),
-            DocumentAsset("../../evil.png", "image/png", b"2"),
+            DocumentAsset("img.png", "image/png", PNG + b"1"),
+            DocumentAsset("../../evil.png", "image/png", PNG + b"2"),
             DocumentAsset("nodata.png", "image/png", None),
         ],
     )
@@ -220,7 +230,7 @@ def test_save_assets_refuses_symlink_target(tmp_path):
     out.mkdir()
     (out / "img.png").symlink_to(tmp_path / "victim")
     r = DocumentConverterResult(
-        "x", assets=[DocumentAsset("img.png", "image/png", b"1")]
+        "x", assets=[DocumentAsset("img.png", "image/png", PNG + b"1")]
     )
     with pytest.raises(ValueError):
         r.save_assets(out)
