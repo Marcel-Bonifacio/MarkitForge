@@ -340,19 +340,7 @@ def _read_merged_ranges(
                 part = parts.get(sheet.get(_REL_NS + "id") or "")
                 if name not in wanted or part is None:
                     continue
-                data = read_member(archive, archive.getinfo(part), budget)
-                start = data.find(b"mergeCell")
-                if start < 0:
-                    continue
-                ranges: List[MergedRange] = []
-                for match in _MERGE_CELL.finditer(data, max(start - 16, 0)):
-                    left, top, right, bottom = match.groups()
-                    first_row, first_column = int(top) - 1, _column_index(left)
-                    last_row = int(bottom) - 1 if bottom else first_row
-                    last_column = _column_index(right) if right else first_column
-                    ranges.append((first_row, first_column, last_row, last_column))
-                    if len(ranges) >= _MAX_MERGED_RANGES:
-                        break
+                ranges = _scan_merge_cells(archive, archive.getinfo(part), budget)
                 if ranges:
                     merged[name] = ranges
     except ResourceLimitException:
@@ -362,6 +350,49 @@ def _read_merged_ranges(
     finally:
         file_stream.seek(position)
     return merged
+
+
+# Longest <mergeCell .../> reference worth matching across a chunk boundary.
+_MERGE_SCAN_OVERLAP = 256
+_MERGE_SCAN_CHUNK = 1 << 20
+
+
+def _scan_merge_cells(
+    archive: zipfile.ZipFile, info: zipfile.ZipInfo, budget: ArchiveBudget
+) -> List[MergedRange]:
+    """Merged ranges of one worksheet part, read in chunks.
+
+    The part is streamed (it can be hundreds of MB) and only the matched
+    references are kept. The same member caps apply as for ``read_member``.
+    """
+    cap = min(info.file_size, budget.limits.max_archive_member_bytes)
+    ranges: List[MergedRange] = []
+    total = 0
+    tail = b""
+    with archive.open(info) as source:
+        while len(ranges) < _MAX_MERGED_RANGES:
+            chunk = source.read(_MERGE_SCAN_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > cap:
+                raise ResourceLimitException(
+                    f"Archive member {info.filename!r} inflates past {cap} bytes "
+                    "(its declared size or max_archive_member_bytes)."
+                )
+            window = tail + chunk
+            for match in _MERGE_CELL.finditer(window):
+                if match.end() <= len(tail):
+                    continue  # already matched in the previous window
+                left, top, right, bottom = match.groups()
+                first_row, first_column = int(top) - 1, _column_index(left)
+                last_row = int(bottom) - 1 if bottom else first_row
+                last_column = _column_index(right) if right else first_column
+                ranges.append((first_row, first_column, last_row, last_column))
+                if len(ranges) >= _MAX_MERGED_RANGES:
+                    break
+            tail = window[-_MERGE_SCAN_OVERLAP:]
+    return ranges
 
 
 def _header_labels(columns: Sequence[Any]) -> List[Any]:

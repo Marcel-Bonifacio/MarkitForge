@@ -29,6 +29,12 @@ MAX_FURNITURE_CHARS = 150
 # affected pages without any content.
 MAX_EMPTIED_SHARE = 0.5
 
+# A line whose numbers change from page to page only counts as furniture
+# when it is short and its numbers never decrease with the page number
+# (page numbers, "Page 3 of 12"). Varying totals or IDs in the margins are
+# content.
+MAX_VARYING_WORDS = 8
+
 _DIGITS_RE = re.compile(r"\d+")
 _ROMAN_RE = re.compile(r"(?=[ivxl])(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})")
 _SPACE_RE = re.compile(r"\s+")
@@ -86,6 +92,7 @@ def find_furniture(pages: Sequence[PageLines]) -> Dict[Tuple[str, str], str]:
         return {}
     seen: Dict[Tuple[str, str], List[int]] = {}
     example: Dict[Tuple[str, str], str] = {}
+    texts: Dict[Tuple[str, str], List[Tuple[int, str]]] = {}
     for page in pages:
         keys: Set[Tuple[str, str]] = set()
         for band, line in _band_lines(page):
@@ -96,6 +103,7 @@ def find_furniture(pages: Sequence[PageLines]) -> Dict[Tuple[str, str], str]:
                 keys.add(key)
                 seen.setdefault(key, []).append(page.index)
                 example.setdefault(key, line.text.strip())
+                texts.setdefault(key, []).append((page.index, line.text))
     odd = sum(1 for p in pages if p.index % 2)
     even = len(pages) - odd
 
@@ -111,9 +119,56 @@ def find_furniture(pages: Sequence[PageLines]) -> Dict[Tuple[str, str], str]:
             enough(len(indexes), len(pages))
             or (n_even == 0 and enough(n_odd, odd))
             or (n_odd == 0 and enough(n_even, even))
-        ):
+        ) and _stable_or_paged(texts[key]):
             found[key] = example[key]
     return found
+
+
+def _stable_or_paged(occurrences: Sequence[Tuple[int, str]]) -> bool:
+    """Whether a repeated line looks like furniture rather than content.
+
+    Identical text on every page qualifies. Text whose numbers vary must be
+    short, and it must vary like a page counter: every number either stays
+    the same or moves in step with the page number (a constant offset, so
+    printed page numbers that start at 1 after a cover page still match).
+    Running totals, IDs and dates that change otherwise are content.
+    """
+    normalised = {
+        _SPACE_RE.sub(" ", text).strip().casefold() for _, text in occurrences
+    }
+    if len(normalised) == 1:
+        return True
+    if len(occurrences[0][1].split()) > MAX_VARYING_WORDS:
+        return False
+    rows = [(index, _numbers(text)) for index, text in occurrences]
+    width = len(rows[0][1])
+    if width == 0 or any(len(numbers) != width for _, numbers in rows):
+        return False
+    paged = False
+    for k in range(width):
+        values = {numbers[k] for _, numbers in rows}
+        if len(values) == 1:
+            continue
+        offsets = {numbers[k] - index for index, numbers in rows}
+        if len(offsets) != 1:
+            return False
+        paged = True
+    return paged
+
+
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50}
+
+
+def _numbers(text: str) -> List[int]:
+    """Numbers in a line; a line that is just a roman numeral gives its value."""
+    key = _SPACE_RE.sub(" ", text).strip().casefold()
+    if key and _ROMAN_RE.fullmatch(key):
+        total = 0
+        for ch, nxt in zip(key, key[1:] + " "):
+            value = _ROMAN_VALUES[ch]
+            total += -value if _ROMAN_VALUES.get(nxt, 0) > value else value
+        return [total]
+    return [int(n) for n in _DIGITS_RE.findall(text)]
 
 
 def strip_furniture(

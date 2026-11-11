@@ -22,7 +22,8 @@ Layout options of the pdfplumber analysis (all on by default):
   removed is listed in ``metadata["removed_headers_footers"]``.
 - ``pdf_outline_headings``: take headings from the PDF outline (bookmarks)
   or heading tags when the document has them.
-- ``pdf_merge_tables``: merge tables continued on the next page.
+- ``pdf_merge_tables``: merge tables continued on the next page (in the
+  joined Markdown; ``result.pages`` keeps each page's own rows).
 
 Other options: ``table_format`` ("markdown", "html" or "auto": HTML only
 for tables with merged cells) and ``pdf_inline_math`` (off by default:
@@ -644,9 +645,17 @@ def _limit(kwargs: Dict[str, Any], name: str, default: int) -> int:
     return number
 
 
+_FALSE_WORDS = {"", "0", "false", "no", "off"}
+
+
 def _flag(kwargs: Dict[str, Any], name: str, default: bool) -> bool:
+    """A boolean option; strings such as "false", "0" or "off" mean False."""
     value = kwargs.get(name)
-    return default if value is None else bool(value)
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSE_WORDS
+    return bool(value)
 
 
 @dataclass
@@ -1011,16 +1020,29 @@ def _tables_cover_form(form_markdown: str, tables: Sequence[PageTable]) -> bool:
     cells = [cell for t in tables for row in t.rows for cell in row if cell]
     if not cells or max(len(cell) for cell in cells) > _MAX_DATA_CELL_CHARS:
         return False
-    haystack = " ".join(" ".join(cell.replace("\\|", "|").split()) for cell in cells)
+    normalised = [" ".join(cell.replace("\\|", "|").split()) for cell in cells]
+    exact = set(normalised)
     for line in form_markdown.splitlines():
         line = line.strip()
         if not line.startswith("|") or _SEPARATOR_ROW_RE.match(line):
             continue
         for cell in line.strip("|").split("|"):
             text = " ".join(cell.split())
-            if text and text not in haystack:
+            if text and not _cell_covered(text, exact, normalised):
                 return False
     return True
+
+
+def _cell_covered(text: str, exact: set, cells: Sequence[str]) -> bool:
+    """Whether a form cell is one of the table cells, or (for text of three
+    characters or more) a whole-word part of one, as when a wrapped cell was
+    split across form rows. "1" or "No" never match inside "100" or "Notes"."""
+    if text in exact:
+        return True
+    if len(text) < 3:
+        return False
+    pattern = re.compile(r"(?<!\w)" + re.escape(text) + r"(?!\w)")
+    return any(pattern.search(cell) for cell in cells)
 
 
 class PdfConverter(DocumentConverter):
@@ -1267,6 +1289,7 @@ class PdfConverter(DocumentConverter):
 
         sections: List[DocumentSection] = []
         chunks: List[str] = []
+        page_texts: List[str] = []  # per page, before marker neutralising
         for rec in records:
             if rec.kind in ("form", "ocr"):
                 md = rec.text
@@ -1275,13 +1298,13 @@ class PdfConverter(DocumentConverter):
             else:
                 md = render_flow(rec.flow, reflow=opts.reflow, vocab=vocab)
             chunks.append(md if rec.kind == "form" else md.strip())
+            page_text = _merge_partial_numbering_lines(md.strip())
+            page_texts.append(page_text)
             sections.append(
                 DocumentSection(
                     index=rec.index,
                     # Page text must not forge the markers join_sections adds.
-                    markdown=neutralize_page_markers(
-                        _merge_partial_numbering_lines(md.strip())
-                    ),
+                    markdown=neutralize_page_markers(page_text),
                     kind="page",
                 )
             )
@@ -1303,12 +1326,19 @@ class PdfConverter(DocumentConverter):
         # Merge MasterFormat-style partial numbering with the following text
         markdown = _merge_partial_numbering_lines(markdown)
 
-        if opts.merge_tables:
-            merged = self._merge_tables(sections)
+        if opts.merge_tables and not opts.page_markers:
+            # Only the joined text gets continued tables merged: result.pages
+            # keeps each page's own rows, so page selection stays exact, and
+            # with page markers on the page boundaries stay visible.
+            merged = self._merge_tables(
+                [
+                    DocumentSection(index=s.index, markdown=text, kind=s.kind)
+                    for s, text in zip(sections, page_texts)
+                ]
+            )
             if merged is not None:
-                sections = merged
                 markdown = "\n\n".join(
-                    s.markdown.strip() for s in sections if s.markdown.strip()
+                    s.markdown.strip() for s in merged if s.markdown.strip()
                 )
         if opts.page_markers:
             markdown = join_sections(sections, markers=True)

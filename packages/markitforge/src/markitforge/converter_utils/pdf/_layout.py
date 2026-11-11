@@ -12,7 +12,7 @@ clusters, weight, spacing and numbering.
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 # A line must be at least this much larger than the body text to become a
 # heading. Kept high on purpose: a false heading is worse than a missed one.
@@ -242,19 +242,6 @@ def is_heading_candidate(text: str, size: float, body: Optional[float]) -> bool:
     return True
 
 
-class HeadingLevels:
-    """Maps heading styles to Markdown levels: largest size is ``#``."""
-
-    def __init__(self, styles: Iterable[Tuple[float, bool]]):
-        ranked = sorted(set(styles), reverse=True)
-        self._levels = {
-            key: min(i + 1, MAX_HEADING_LEVEL) for i, key in enumerate(ranked)
-        }
-
-    def level(self, key: Tuple[float, bool]) -> int:
-        return self._levels.get(key, MAX_HEADING_LEVEL)
-
-
 def _same_heading(prev: TextLine, cur: TextLine) -> bool:
     """Whether two heading lines are one wrapped heading."""
     gap = cur.top - prev.bottom
@@ -271,29 +258,6 @@ def simple_flow(lines: Sequence[TextLine], blocks: Sequence["Block"]) -> Flow:
         items.append((block.top, block.x0, len(lines) + j, block))
     items.sort(key=lambda it: (it[0], it[1], it[2]))
     return [it[3] for it in items]
-
-
-def heading_runs(
-    lines: Sequence[TextLine], body: Optional[float]
-) -> List[Tuple[int, int, TextLine]]:
-    """Runs of consecutive heading lines as (start, end, first_line)."""
-    runs: List[Tuple[int, int, TextLine]] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if not is_heading_candidate(line.text, line.size, body):
-            i += 1
-            continue
-        j = i + 1
-        while (
-            j < len(lines)
-            and is_heading_candidate(lines[j].text, lines[j].size, body)
-            and _same_heading(lines[j - 1], lines[j])
-        ):
-            j += 1
-        runs.append((i, j, line))
-        i = j
-    return runs
 
 
 def _norm(text: str) -> str:
@@ -750,53 +714,3 @@ class Block:
     markdown: str
     x1: Optional[float] = None
     bottom: Optional[float] = None
-
-
-def render_page(
-    lines: Sequence[TextLine],
-    blocks: Sequence[Block],
-    body: Optional[float],
-    levels: HeadingLevels,
-) -> str:
-    """Markdown for one page: paragraphs, headings and blocks in reading order."""
-    heading_at: Dict[int, Tuple[int, TextLine]] = {
-        start: (end, first) for start, end, first in heading_runs(lines, body)
-    }
-    items: List[Tuple[float, float, int, Any]] = []
-    i = 0
-    while i < len(lines):
-        if i in heading_at:
-            end, first = heading_at[i]
-            text = " ".join(_norm(l.text) for l in lines[i:end])
-            md = "#" * levels.level(first.style_key) + " " + text
-            items.append((first.top, first.x0, 0, md))
-            i = end
-        else:
-            items.append((lines[i].top, lines[i].x0, 1, lines[i]))
-            i += 1
-    for block in blocks:
-        items.append((block.top, block.x0, 0, block.markdown))
-    items.sort(key=lambda it: (it[0], it[1]))
-
-    out: List[str] = []
-    para: List[str] = []
-    prev: Optional[TextLine] = None
-    for _top, _x0, kind, payload in items:
-        if kind == 1:
-            line: TextLine = payload
-            if para and prev is not None:
-                gap = line.top - prev.bottom
-                if gap > 0.7 * max(prev.size, line.size, 1.0):
-                    out.append("\n".join(para))
-                    para = []
-            para.append(line.text)
-            prev = line
-        else:
-            if para:
-                out.append("\n".join(para))
-                para = []
-            prev = None
-            out.append(payload)
-    if para:
-        out.append("\n".join(para))
-    return "\n\n".join(p for p in out if p.strip())

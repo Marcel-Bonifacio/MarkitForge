@@ -115,21 +115,23 @@ def _box(item: Item) -> Tuple[float, float, float, float]:
     return item.x0, item.top, max(x1, item.x0), max(bottom, item.top)
 
 
-def build_runs(chars: Sequence[Dict[str, Any]]) -> Tuple[List[Run], List[str]]:
+def build_runs(
+    chars: Sequence[Dict[str, Any]],
+) -> Tuple[List[Run], List[Dict[str, Any]]]:
     """Group characters into word runs, in content-stream order.
 
-    Returns the runs of horizontal text and the text of rotated characters
-    (margin stamps and the like), which do not take part in the layout.
+    Returns the runs of horizontal text and the rotated characters (margin
+    stamps, sideways tables), which are laid out separately.
     """
     runs: List[Run] = []
-    rotated: List[str] = []
+    rotated: List[Dict[str, Any]] = []
     fonts: Dict[str, Tuple[bool, bool, bool]] = {}
     cur: Optional[Run] = None
     space = False
     for c in chars:
         text = c.get("text") or ""
         if c.get("upright") is False:
-            rotated.append(text)
+            rotated.append(c)
             continue
         if not text.strip():
             space = True
@@ -472,20 +474,61 @@ def layout_page(chars: Sequence[Dict[str, Any]], blocks: Sequence[Block] = ()) -
                 entries.append((item.top, item.x0, item))
         entries.sort(key=lambda e: (e[0], e[1]))
         flow.extend(entry[2] for entry in entries)
-    stamp = " ".join("".join(rotated).split())
-    if stamp:
-        flow.append(
-            TextLine(
-                text=stamp,
-                x0=0.0,
-                top=float("inf"),
-                x1=0.0,
-                bottom=float("inf"),
-                size=0.0,
-                bold=False,
-                total_chars=len(stamp),
-                block=-1,
-                rotated=True,
+    flow.extend(rotated_lines(rotated))
+    return flow
+
+
+def rotated_lines(chars: Sequence[Dict[str, Any]]) -> List[TextLine]:
+    """Sideways text as separate lines in reading order.
+
+    Characters turned a quarter turn are grouped into lines by their x
+    position (a sideways line is a vertical strip). Text turned
+    counter-clockwise reads bottom to top with its first line on the left;
+    clockwise text reads top to bottom with its first line on the right.
+    Each line keeps ``rotated=True`` and goes after the page's upright text.
+    """
+    if not chars:
+        return []
+    columns: List[Tuple[float, float, int, List[Dict[str, Any]]]] = []
+    for c in chars:
+        x0, x1 = float(c.get("x0", 0.0)), float(c.get("x1", 0.0))
+        centre = (x0 + x1) / 2
+        width = max(x1 - x0, float(c.get("size") or 0.0) * 0.5, 1.0)
+        matrix = c.get("matrix") or (1, 0, 0, 1, 0, 0)
+        direction = 1 if float(matrix[1]) >= 0 else -1
+        for k, (col_centre, col_width, col_dir, members) in enumerate(columns):
+            if col_dir == direction and abs(col_centre - centre) <= 0.5 * max(
+                width, col_width
+            ):
+                members.append(c)
+                break
+        else:
+            columns.append((centre, width, direction, [c]))
+    lines: List[Tuple[int, float, TextLine]] = []
+    for centre, _width, direction, members in columns:
+        # Counter-clockwise text runs upward: the first character is lowest.
+        members.sort(key=lambda c: float(c.get("top", 0.0)), reverse=direction > 0)
+        text = " ".join("".join(str(c.get("text") or "") for c in members).split())
+        if not text:
+            continue
+        lines.append(
+            (
+                direction,
+                centre,
+                TextLine(
+                    text=text,
+                    x0=min(float(c.get("x0", 0.0)) for c in members),
+                    top=float("inf"),
+                    x1=max(float(c.get("x1", 0.0)) for c in members),
+                    bottom=float("inf"),
+                    size=float(members[0].get("size") or 0.0),
+                    bold=False,
+                    total_chars=len(text),
+                    block=-1,
+                    rotated=True,
+                ),
             )
         )
-    return flow
+    # Counter-clockwise lines read left to right, clockwise ones right to left.
+    lines.sort(key=lambda entry: (-entry[0], entry[1] * entry[0]))
+    return [line for _d, _c, line in lines]
