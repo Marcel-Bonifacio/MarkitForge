@@ -170,3 +170,18 @@ def test_private_urls_blocked_when_enabled(monkeypatch):
     monkeypatch.setattr(server, "_block_private_urls", True)
     with pytest.raises(ToolError):
         call("convert_to_markdown", uri="http://127.0.0.1:9/")
+
+
+def test_write_without_nofollow_never_follows_symlinks(tmp_path, monkeypatch):
+    # The Windows code path (no os.O_NOFOLLOW), exercised on any platform.
+    monkeypatch.delattr(server.os, "O_NOFOLLOW", raising=False)
+    out = tmp_path / "out"
+    out.mkdir()
+    victim = tmp_path / "victim.txt"
+    (out / "a.md").symlink_to(victim)
+    (out / "a-2.md").write_text("keep me")
+    path = server._write_new_file(out, "a.md", "new text")
+    assert path.name == "a-3.md" and path.read_text() == "new text"
+    assert not victim.exists()
+    assert (out / "a-2.md").read_text() == "keep me"
+    assert [p.name for p in out.iterdir() if p.name.startswith(".")] == []

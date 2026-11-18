@@ -240,7 +240,9 @@ def _whole_numbers_as_ints(frame: Any) -> Any:
     A column of integers with an empty cell is read as float64, so 4 would
     print as "4.0". In float columns and in mixed (object) columns, whole
     numbers are printed as integers ("4") and fractions are kept ("4.5").
-    Rewritten columns hold strings, with "" for empty cells.
+    Empty cells of text and date columns become "" here as well: pandas 2
+    ignores ``to_html(na_rep=...)`` for ``None`` in text columns and ``NaT``
+    in date columns, pandas 3 does not. Rewritten columns hold strings.
     """
     out = None
     for position in range(len(frame.columns)):
@@ -250,18 +252,20 @@ def _whole_numbers_as_ints(frame: Any) -> Any:
             if series.isna().all():
                 continue
             cells = ["" if v != v else _format_float(float(v)) for v in series]
+        elif kind == "M":
+            missing = series.isna()
+            if not missing.any():
+                continue
+            # pandas' own date text: "2020-01-01", or with the time if any has one.
+            text = series.astype(str)
+            cells = ["" if gap else value for value, gap in zip(text, missing)]
         elif kind == "O":
-            if not any(_is_whole(v) for v in series):
+            missing = series.isna()
+            if not missing.any() and not any(_is_whole(v) for v in series):
                 continue
             cells = [
-                (
-                    ""
-                    if v is None or (isinstance(v, float) and v != v)
-                    else str(int(v))
-                    if _is_whole(v)
-                    else v
-                )
-                for v in series
+                ("" if gap else str(int(v)) if _is_whole(v) else v)
+                for v, gap in zip(series, missing)
             ]
         else:
             continue

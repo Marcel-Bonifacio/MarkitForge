@@ -33,6 +33,7 @@ dependencies = [
   "markdownify",
   "charset-normalizer",
   "defusedxml",
+  "tomli>=1.1.0; python_version < '3.11'",  # config files (tomllib backport)
 ]
 
 [project.optional-dependencies]
@@ -89,6 +90,7 @@ extra-dependencies = [
   "openai",
   "pyyaml",
   "reportlab",
+  "python-docx",  # test fixtures build .docx files
 ]
 
 [tool.hatch.envs.types]

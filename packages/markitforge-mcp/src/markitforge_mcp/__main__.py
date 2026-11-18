@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, List, Optional
@@ -103,18 +104,56 @@ def _output_dir() -> Path:
 def _write_new_file(directory: Path, name: str, text: str) -> Path:
     """Create a new file without following symlinks or overwriting anything."""
     stem, suffix = os.path.splitext(name)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    candidates = (
+        directory / (name if n == 1 else f"{stem}-{n}{suffix}") for n in range(1, 1000)
+    )
     data = text.encode("utf-8")
-    for n in range(1, 1000):
-        candidate = directory / (name if n == 1 else f"{stem}-{n}{suffix}")
-        try:
-            fd = os.open(candidate, flags, 0o600)
-        except FileExistsError:
-            continue
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is not None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+        for candidate in candidates:
+            try:
+                fd = os.open(candidate, flags, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            return candidate
+        raise ToolError("Could not pick a free output file name.")
+
+    # No O_NOFOLLOW (Windows): opening a name can follow a planted symlink.
+    # Write a fresh, randomly named file instead and hard-link it into place:
+    # os.link fails on any existing entry (link or not) and never follows it.
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".markitforge-", suffix=".tmp")
+    try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        return candidate
-    raise ToolError("Could not pick a free output file name.")
+        for candidate in candidates:
+            try:
+                _place_without_replacing(tmp, candidate)
+            except FileExistsError:
+                continue
+            return candidate
+        raise ToolError("Could not pick a free output file name.")
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def _place_without_replacing(src: str, dst: Path) -> None:
+    """Give ``src`` the name ``dst``; FileExistsError if ``dst`` exists.
+
+    A hard link refuses any existing entry. Drives without hard links (FAT,
+    some network shares) fall back to os.rename, which on Windows also
+    refuses to replace an existing entry; elsewhere the error is raised.
+    """
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        raise
+    except OSError:
+        if os.name != "nt":
+            raise
+        os.rename(src, dst)
 
 
 def _safe_name(name: str) -> str:
