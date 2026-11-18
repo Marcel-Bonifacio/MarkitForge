@@ -38,8 +38,8 @@ from typing import Any, Dict, Optional
 
 if sys.version_info >= (3, 11):
     import tomllib
-else:  # pragma: no cover
-    tomllib = None  # type: ignore[assignment]
+else:  # pragma: no cover - Python 3.10: the same parser, as a backport
+    import tomli as tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -142,9 +142,6 @@ def load_config(path: Optional[os.PathLike] = None) -> Config:
     if not p.is_file():
         if explicit:
             raise ValueError(f"Config file not found: {p}")
-        return Config(path=None)
-    if tomllib is None:  # pragma: no cover - Python 3.10
-        logger.warning("Config files need Python 3.11+ (tomllib); ignoring %s", p)
         return Config(path=None)
     try:
         data = tomllib.loads(p.read_text(encoding="utf-8"))
