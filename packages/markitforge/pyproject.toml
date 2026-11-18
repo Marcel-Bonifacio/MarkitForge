@@ -89,6 +89,7 @@ extra-dependencies = [
   "openai",
   "pyyaml",
   "reportlab",
+  "python-docx",  # test fixtures build .docx files
 ]
 
 [tool.hatch.envs.types]

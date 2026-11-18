@@ -29,10 +29,22 @@ from ._stream_info import StreamInfo
 from ._uri_utils import parse_data_uri, file_uri_to_path
 from ._net import check_public_url
 
-try:  # Magika is optional: without it, type detection uses extension, mimetype and charset sniffing.
-    import magika as _magika_module
-except ImportError:  # pragma: no cover - depends on the install
-    _magika_module = None  # type: ignore[assignment]
+
+def _load_magika() -> Any:
+    """A Magika detector, or None when Magika is not installed.
+
+    Imported on first use rather than with the package: Magika pulls in
+    onnxruntime, which is slow to load and can print platform warnings, and
+    many callers (``--help``, ``--use-docintel``, ``use_magika=False``) never
+    need it. Without Magika, type detection uses the extension, MIME type and
+    charset sniffing.
+    """
+    try:
+        import magika
+    except ImportError:  # pragma: no cover - depends on the install
+        return None
+    return magika.Magika()
+
 
 logger = logging.getLogger(__name__)
 
@@ -218,11 +230,7 @@ class MarkitForge:
         use_magika = kwargs.get("use_magika", True) and not os.environ.get(
             "MARKITFORGE_DISABLE_MAGIKA"
         )
-        self._magika = (
-            _magika_module.Magika()
-            if (use_magika and _magika_module is not None)
-            else None
-        )
+        self._magika = _load_magika() if use_magika else None
 
         # TODO - remove these (see enable_builtins)
         self._llm_client: Any = None

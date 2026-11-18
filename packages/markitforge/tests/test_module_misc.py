@@ -327,6 +327,21 @@ def test_get_content_disposition_filename_decodes_rfc5987() -> None:
 #    assert test_string in result.text_content
 
 
+def _flac_available() -> bool:
+    """speech_recognition encodes audio with a FLAC tool it ships for some
+    platforms only (none for Windows on ARM)."""
+    try:
+        from speech_recognition.audio import get_flac_converter
+
+        get_flac_converter()
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not _flac_available(), reason="no FLAC encoder for speech_recognition here"
+)
 def test_speech_transcription_uses_https(monkeypatch: pytest.MonkeyPatch) -> None:
     from speech_recognition.recognizers import google
 

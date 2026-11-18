@@ -170,7 +170,9 @@ def test_explicitly_named_missing_config_is_an_error(tmp_path, monkeypatch):
         text=True,
     )
     assert run.returncode == 1 and run.stdout == ""
-    assert run.stderr.strip() == f"Config file not found: {missing}"
+    # The error is the last line; libraries may print their own notices first
+    # (onnxruntime does on some CI machines).
+    assert run.stderr.strip().splitlines()[-1] == f"Config file not found: {missing}"
 
 
 def test_pdf_image_export_stops_at_max_export_bytes():
